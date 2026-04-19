@@ -1,0 +1,50 @@
+[
+  {
+    "id": "1",
+    "text": "bang , ada foto rumah nya ga. upload di instagram atau house tour aja ke rmh yang di ceritain ini ok penasaran",
+    "source": "youtube",
+    "domain": "life chapter",
+    "label_basic": "Love",
+    "label_finegrained": "Attraction",
+    "annotation_phase": "phase 3",
+    "splitting": "train",
+    "new_label_basic": "Love",
+    "new_label_fine_grained": "Nonsexual desire"
+  },
+  {
+    "id": "2",
+    "text": "aku bener bener kesel banget sama kelakuannya dia kemaren",
+    "source": "twitter",
+    "domain": "personal",
+    "label_basic": "Anger",
+    "label_finegrained": "Annoyance",
+    "annotation_phase": "phase 3",
+    "splitting": "val",
+    "new_label_basic": "Anger",
+    "new_label_fine_grained": "Annoyance"
+  },
+  {
+    "id": "3",
+    "text": "akhirnya wisuda juga setelah sekian lama berjuang",
+    "source": "instagram",
+    "domain": "achievement",
+    "label_basic": "Joy",
+    "label_finegrained": "Pride",
+    "annotation_phase": "phase 3",
+    "splitting": "test",
+    "new_label_basic": "Joy",
+    "new_label_fine_grained": "Pride"
+  },
+  {
+    "id": "4",
+    "text": "ya ampun bagus banget pemandangannya bikin nangis",
+    "source": "youtube",
+    "domain": "travel",
+    "label_basic": "Love",
+    "label_finegrained": "Admiration",
+    "annotation_phase": "phase 3",
+    "splitting": "train",
+    "new_label_basic": "Love",
+    "new_label_fine_grained": "Admiration"
+  }
+]
