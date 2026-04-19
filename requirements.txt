@@ -1,0 +1,12 @@
+torch
+torchvision
+torchaudio
+transformers
+datasets
+scikit-learn
+pandas
+numpy
+mlflow
+nltk
+tqdm
+accelerate
