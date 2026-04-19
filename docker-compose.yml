@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  mlflow-server:
+    image: ghcr.io/mlflow/mlflow:v2.9.2
+    container_name: mlflow-server
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server 
+      --host 0.0.0.0 
+      --port 5000 
+      --backend-store-uri sqlite:////mlflow_data/mlflow.db 
+      --default-artifact-root /mlflow_data/artifacts
+    volumes:
+      - ./mlflow_data:/mlflow_data
+  
+  pipeline:
+    build: .
+    container_name: emotion_pipeline
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./run_pipeline.py:/app/run_pipeline.py
+    working_dir: /app
+    depends_on:
+      - mlflow-server
+    # Since we want to let the user run it on-demand, or interactive:
+    stdin_open: true # docker run -i
+    tty: true        # docker run -t
