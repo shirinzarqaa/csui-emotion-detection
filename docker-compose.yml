@@ -5,11 +5,11 @@ services:
     image: ghcr.io/mlflow/mlflow:v2.9.2
     container_name: mlflow-server
     ports:
-      - "5000:5000"
+      - "8002:8002"
     command: >
       mlflow server 
       --host 0.0.0.0 
-      --port 5000 
+      --port 8002 
       --backend-store-uri sqlite:////mlflow_data/mlflow.db 
       --default-artifact-root /mlflow_data/artifacts
     volumes:
@@ -19,7 +19,7 @@ services:
     build: .
     container_name: emotion_pipeline
     environment:
-      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - MLFLOW_TRACKING_URI=http://mlflow-server:8002
     volumes:
       - ./data:/app/data
       - ./src:/app/src
