@@ -206,9 +206,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Data files (local only, NOT committed to repo)
-data/*.json
-data/*.xlsx
+# Data files (only exclude old/duplicate data)
+data/dataset.json
+data/all.json
 *.xlsx
 
 # MLflow artifacts (generated at runtime)
