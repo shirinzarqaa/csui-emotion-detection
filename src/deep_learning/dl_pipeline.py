@@ -247,14 +247,14 @@ def train_single_run(
         val_metrics = compute_all_metrics_binary(y_val_true, y_val_pred, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
         val_f1 = val_metrics['f1_macro']
 
-        # Derive basic predictions for hierarchical eval
+        # Derive basic predictions from fine-grained predictions via taxonomy
         y_val_pred_basic = fine_to_basic_predictions(y_val_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
         val_basic_metrics = compute_all_metrics_binary(y_val_basic, y_val_pred_basic, ID_TO_BASIC, {})
 
         logger.info(
             f"Epoch {epoch:2d}/{num_epochs} | "
             f"tr_loss={train_loss:.4f} | vl_loss={val_loss:.4f} | "
-            f"vl_f1_m={val_f1:.4f} | vl_hF={val_metrics['hierarchical_f1']:.4f} | "
+            f"vl_f1_m={val_f1:.4f} | "
             f"vl_basic_f1_m={val_basic_metrics['f1_macro']:.4f}"
         )
 
@@ -314,7 +314,6 @@ def train_single_run(
 
         logger.info(
             f"Test results: f1_m={test_metrics['f1_macro']:.4f} | "
-            f"hF={test_metrics['hierarchical_f1']:.4f} | "
             f"sub_acc={test_metrics['subset_accuracy']:.4f} | "
             f"ham_loss={test_metrics['hamming_loss']:.4f}"
         )

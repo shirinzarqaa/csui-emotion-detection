@@ -1,31 +1,31 @@
 # Multi-Label Hierarchical Emotion Classification for Indonesian Text
 
-Pipeline klasifikasi emosi hierarkis (multi-label) untuk teks berbahasa Indonesia, mendukung 3 pendekatan: **Traditional ML**, **Deep Learning**, dan **Transformers**. Semua hasil eksperimen tercatat otomatis ke **MLflow**.
+An end-to-end pipeline for hierarchical multi-label emotion classification of Indonesian social media text. Supports three approaches — **Traditional ML**, **Deep Learning**, and **Transformers** — with full experiment tracking via **MLflow**.
 
 ---
 
-## Arsitektur Sistem
+## System Architecture
 
 ```
 csui-emotion-detection/
 ├── data/
-│   └── new_all.json          # Dataset utama (32.598 sampel)
+│   └── new_all.json          # Primary dataset (32,598 samples)
 ├── src/
-│   ├── data_loader.py        # Parsing multi-label: new_label_basic (7 label) → new_label_fine_grained (45 label)
+│   ├── data_loader.py        # Multi-label parsing: new_label_basic (7 labels) → new_label_fine_grained (45 labels)
 │   ├── utils/
-│   │   ├── metrics.py        # Metrik evaluasi: f1-macro/micro/weighted, hamming loss, subset accuracy, hierarchical P/R/F
-│   │   └── preprocessing.py  # 3 mode preprocessing: traditional, DL, transformers
+│   │   ├── metrics.py        # Evaluation: f1-macro/micro/weighted, hamming loss, subset accuracy, per-label F1
+│   │   └── preprocessing.py  # 3 preprocessing modes: traditional, DL, transformers
 │   ├── traditional/
-│   │   └── traditional_pipeline.py  # 54 kombinasi: BR/LP × Unigram/Bigram/Trigram × BoW/TF-IDF × LR/NB/SVM
+│   │   └── traditional_pipeline.py  # 54 runs: BR/LP × Unigram/Bigram/Trigram × BoW/TF-IDF × LR/NB/SVM
 │   ├── deep_learning/
-│   │   ├── dl_pipeline.py    # 12 run: FastText/IndoBERT × BiLSTM/CNN × ablation study
+│   │   ├── dl_pipeline.py    # 12 runs: FastText/IndoBERT × BiLSTM/CNN ablation study
 │   │   └── models.py         # BiLSTM, TextCNN, FastTextDataset, BertDataset
 │   └── transformers/
-│       └── transformer_pipeline.py  # 40 run HPO: 5 model × 4 LR × 2 batch size
-├── analysis/                 # CSV hasil manual analysis setelah setiap run
+│       └── transformer_pipeline.py  # 40 HPO runs: 5 models × 4 LR × 2 batch sizes
+├── analysis/                 # CSV error analysis files after each run
 ├── run_pipeline.py           # Orchestrator: --run traditional|dl|transformers|all
 ├── requirements.txt
-├── docker-compose.yml
+├── docker-compose.yml        # Parallel Docker: 3 containers + 1 MLflow server
 └── README.md
 ```
 
@@ -43,7 +43,7 @@ csui-emotion-detection/
 | **surprise** | confusion, realization, surprise |
 | **no emotion** | no emotion |
 
-Taxonomy ini dibangun dari analisis baris single-label (27.794 dari 32.598 data) — setiap fine-grained label memiliki tepat satu parent basic label.
+Taxonomy built from single-label rows (27,794 of 32,598 data) — each fine-grained label maps to exactly one basic parent.
 
 ---
 
@@ -67,54 +67,50 @@ Pipeline reads `new_label_basic` / `new_label_fine_grained` automatically via `s
 
 ---
 
-## Preprocessing (3 Mode)
+## Preprocessing (3 Modes)
 
 | Step | Traditional | Deep Learning | Transformers |
 |---|---|---|---|
-| Remove `[URL]` dan URL | ✅ | ❌ | ✅ |
-| Remove `[USERNAME]` dan `@user` | ✅ | ❌ | ✅ |
-| Ekstraksi emoji → demojize | ✅ | ✅ | ❌ |
-| Normalisasi slang | ✅ | ✅ | ✅ |
-| Stemming (Sastrawi + LRU cache) | ✅ | ❌ | ❌ |
-| Remove stopwords | ✅ | ❌ | ❌ |
+| Remove `[URL]` and URLs | ✓ | ✗ | ✓ |
+| Remove `[USERNAME]` and `@user` | ✓ | ✗ | ✓ |
+| Emoji extraction → demojize | ✓ | ✓ | ✗ |
+| Slang normalization | ✓ | ✓ | ✓ |
+| Stemming (Sastrawi + LRU cache) | ✓ | ✗ | ✗ |
+| Remove stopwords | ✓ | ✗ | ✗ |
 
-Slang dictionary (125+ mappings) dan Indonesian stopwords (200+ words) di `src/utils/preprocessing.py`.
-Berasal dari praktik terbaik NLP Bahasa Indonesia — sesuaikan dengan referensi tesis Anda.
+Slang dictionary (125+ mappings) and Indonesian stopwords (200+ words) in `src/utils/preprocessing.py`. Derived from Indonesian NLP best practices — adjust to match your thesis references.
 
 ---
 
-## Evaluasi Metrik
+## Evaluation Metrics
 
-Setiap pipeline menghitung **8 metrik evaluasi**:
+Each pipeline computes **5 core metrics** + per-label F1:
 
-| Metrik | Deskripsi |
+| Metric | Description |
 |---|---|
-| **Subset Accuracy (Exact Match Ratio)** | Persentase prediksi yang cocok sempurna dengan ground truth (semua label benar) |
-| **Hamming Loss** | Rata-rata label yang salah diprediksi per sampel |
-| **F1-Macro** | Rata-rata F1 per label (tanpa bobot) |
-| **F1-Micro** | F1 global (aggregat semua label) |
-| **F1-Weighted** | F1 per label dibobot berdasarkan frekuensi label |
-| **Hierarchical Precision** | Precision dengan ekspansi ke parent basic label |
-| **Hierarchical Recall** | Recall dengan ekspansi ke parent basic label |
-| **Hierarchical F1** | Harmonic mean dari hP dan hR |
+| **Subset Accuracy (Exact Match Ratio)** | Percentage of samples where all labels match ground truth exactly |
+| **Hamming Loss** | Average fraction of incorrectly predicted labels per sample |
+| **F1-Macro** | Average F1 across all labels (unweighted) |
+| **F1-Micro** | Global F1 (aggregates all labels) |
+| **F1-Weighted** | Per-label F1 weighted by label frequency |
 
-Per-label F1 juga dilaporkan untuk setiap fine-grained label. Semua metrik tercatat ke MLflow.
+Per-label F1 scores are also reported for all 45 fine-grained labels. All metrics are logged to MLflow.
 
 ---
 
-## Pipeline: Traditional Machine Learning (54 run)
+## Pipeline: Traditional Machine Learning (54 runs)
 
-### Skenario
+### Scenarios
 
-| Skenario | Target | Strategi |
+| Scenario | Target | Strategy |
 |---|---|---|
-| **BR_Basic** | 7 basic labels | Binary Relevance: 7 classifier independen |
-| **LP_Basic** | 7 basic labels | Label Powerset: kombinasi multi-label → single multi-class |
-| **BR_Fine** | 45 fine-grained labels | Binary Relevance: 45 classifier independen |
+| **BR_Basic** | 7 basic labels | Binary Relevance: 7 independent classifiers |
+| **LP_Basic** | 7 basic labels | Label Powerset: multi-label combo → single multi-class |
+| **BR_Fine** | 45 fine-grained labels | Binary Relevance: 45 independent classifiers |
 
-### Fitur & Classifier (6 kombinasi × 3 model = 18 run per skenario)
+### Feature Extraction & Classifiers (6 combinations × 3 models = 18 runs per scenario)
 
-| Ekstraksi Fitur | Classifier |
+| Feature Extraction | Classifier |
 |---|---|
 | Unigram → Bag of Words | Logistic Regression (max_iter=2000) |
 | Unigram → TF-IDF | Multinomial Naive Bayes (alpha=1.0) |
@@ -123,35 +119,35 @@ Per-label F1 juga dilaporkan untuk setiap fine-grained label. Semua metrik terca
 | Trigram → Bag of Words | |
 | Trigram → TF-IDF | |
 
-Total: 3 skenario × 6 fitur × 3 model = **54 run**. Model di-log ke MLflow via `mlflow.sklearn.log_model()`.
+Total: 3 scenarios × 6 features × 3 models = **54 runs**. Models logged to MLflow via `mlflow.sklearn.log_model()`.
 
 ---
 
-## Pipeline: Deep Learning (12 run)
+## Pipeline: Deep Learning (12 runs)
 
 ### Embedding
 
-Two different embedding approaches tested as ablation study:
+Two embedding approaches tested in ablation:
 
-| Embedding | Dimensi | Source | Why chosen |
+| Embedding | Dimension | Source | Rationale |
 |---|---|---|---|
-| **FastText** (cc.id.300.vec) | 300-dim | Facebook pre-trained Indonesian vectors | Subword info (char n-grams) → handles OOV & morphologically rich languages like Indonesian. Not contextual but lightweight. |
+| **FastText** (cc.id.300.vec) | 300-dim | Facebook pre-trained Indonesian vectors | Subword info (char n-grams) handles OOV and morphologically rich languages. Lightweight, not contextual. |
 | **IndoBERT** (indolem/indobert-base-uncased) | 768-dim | IndoLEM pre-trained | Contextual embeddings capturing sentence-level semantics. Frozen for feature extraction to keep training fast. |
 
 ### Architecture & Ablation
 
-| Model | Variasi Ablation |
+| Model | Ablation Variants |
 |---|---|
 | **Bi-LSTM** | hidden_dims = [64, 128, 256] |
 | **CNN** | num_filters = [50, 100, 150] |
 
-Total: 2 embedding × (3 BiLSTM + 3 CNN) = **12 run**. Training loop: BCEWithLogitsLoss, Adam(lr=1e-3), early stopping (patience=3). Model di-log ke MLflow via `mlflow.pytorch.log_model()`.
+Total: 2 embeddings × (3 BiLSTM + 3 CNN) = **12 runs**. Training: BCEWithLogitsLoss, Adam(lr=1e-3), early stopping (patience=3). Models logged to MLflow via `mlflow.pytorch.log_model()`.
 
 ---
 
-## Pipeline: Transformers (40 run HPO)
+## Pipeline: Transformers (40 HPO runs)
 
-### Model dari HuggingFace
+### HuggingFace Models
 
 | Model | Model ID | Tokenizer |
 |---|---|---|
@@ -165,18 +161,18 @@ Total: 2 embedding × (3 BiLSTM + 3 CNN) = **12 run**. Training loop: BCEWithLog
 
 - Learning rates: `[2e-5, 3e-5, 4e-5, 5e-5]`
 - Batch sizes: `[16, 32]`
-- Training: 3 epoch, weight_decay=0.01, `problem_type="multi_label_classification"`
+- Training: 3 epochs, weight_decay=0.01, `problem_type="multi_label_classification"`
 
-Total: 5 model × 4 LR × 2 BS = **40 run**. Checkpoints di-log ke MLflow otomatis via `report_to="mlflow"`.
+Total: 5 models × 4 LR × 2 BS = **40 runs**. Checkpoints auto-logged to MLflow via `report_to="mlflow"`.
 
 ---
 
-## Cara Menjalankan
+## How to Run
 
-### Docker (Parallel — Semua Pipeline Sekaligus)
+### Docker (Parallel — All Pipelines Simultaneously)
 
 ```bash
-# Jalankan MLflow + 3 pipeline containers secara paralel:
+# Launch MLflow server + 3 pipeline containers in parallel:
 docker-compose up --build
 
 # Monitoring:
@@ -184,21 +180,22 @@ docker-compose up --build
 # - Container logs: docker-compose logs -f
 ```
 
-Ini akan menjalankan **3 container terpisah**:
-| Container | Pipeline | Eksperimen MLflow |
-|---|---|---|
-| `pipeline-traditional` | Traditional ML (54 run) | `Traditional_ML_MultiLabel` |
-| `pipeline-dl` | Deep Learning (12 run) | `Deep_Learning_MultiLabel` |
-| `pipeline-transformers` | Transformers (40 run) | `Transformer_MultiLabel` |
+This starts **3 independent containers** running in parallel:
 
-Semua pipeline berjalan **paralel**, menulis ke MLflow server yang sama. Total 106 run.
+| Container | Pipeline | MLflow Experiment | Runs |
+|---|---|---|---|
+| `pipeline-traditional` | Traditional ML | `Traditional_ML_MultiLabel` | 54 |
+| `pipeline-dl` | Deep Learning | `Deep_Learning_MultiLabel` | 12 |
+| `pipeline-transformers` | Transformers | `Transformer_MultiLabel` | 40 |
 
-### Menjalankan Satu Pipeline Saja
+All write to the same MLflow server. Total: **106 concurrent runs**.
+
+### Run a Single Pipeline Only
 
 ```bash
-docker-compose up traditional       # Hanya Traditional ML
-docker-compose up deep-learning     # Hanya Deep Learning
-docker-compose up transformers      # Hanya Transformers
+docker-compose up traditional       # Traditional ML only
+docker-compose up deep-learning     # Deep Learning only
+docker-compose up transformers      # Transformers only
 ```
 
 ### Local (without Docker)
@@ -217,20 +214,24 @@ python run_pipeline.py --run transformers
 
 # Or directly:
 python -m src.traditional.traditional_pipeline --data_path ./data/new_all.json
+python -m src.deep_learning.dl_pipeline --data_path ./data/new_all.json
+python -m src.transformers.transformer_pipeline --data_path ./data/new_all.json
 ```
 
-### Monitoring MLflow
+### MLflow Monitoring
+
 ```bash
 mlflow ui
 # Open http://localhost:5000 (local) or http://localhost:8002 (Docker)
 ```
 
-### Manual Analysis
-After each run, CSV error analysis is automatically generated in `analysis/` with columns: `Text`, `True_Basic`, `True_Fine`, `Pred_Basic`, `Pred_Fine`, `Status`.
+### Manual Error Analysis
+
+After each run, a CSV is automatically generated in `analysis/` with columns: `Text`, `True_Basic`, `True_Fine`, `Pred_Basic`, `Pred_Fine`, `Status`.
 
 ---
 
-## Dependensi
+## Dependencies
 
 ```
 torch, torchvision, torchaudio
@@ -239,9 +240,8 @@ datasets
 scikit-learn
 pandas, numpy
 mlflow
-Sastrawi     # Indonesian stemmer
-emoji        # Emoji handling
-nltk         # (listed, not actively used in core pipeline)
+Sastrawi         # Indonesian stemmer
+emoji            # Emoji handling
 tqdm
 accelerate
 loguru
@@ -249,5 +249,6 @@ loguru
 
 ---
 
-## Lisensi
-MIT — lihat `LICENSE` file.
+## License
+
+MIT — see `LICENSE` file.
