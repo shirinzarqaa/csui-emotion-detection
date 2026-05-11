@@ -159,6 +159,7 @@ def train_single_run(
     embedding_type,
     model_type,
     param_value,
+    target_level,  # 'basic' or 'fine'
     train_texts, val_texts, test_texts,
     y_train_fine, y_val_fine, y_test_fine,
     y_train_basic, y_val_basic, y_test_basic,
@@ -171,23 +172,28 @@ def train_single_run(
     patience=3,
     max_len=128,
 ):
-    logger.info("=" * 60)
-    run_tag = f"{model_type}_{embedding_type}_{'hid' if model_type == 'bilstm' else 'filt'}{param_value}"
-    logger.info(f"Starting run: {run_tag}")
+    is_basic = (target_level == 'basic')
+    num_classes = len(BASIC_TO_ID) if is_basic else len(FINE_TO_ID)
+    id_to_class = ID_TO_BASIC if is_basic else ID_TO_FINE
+    class_to_parent = {} if is_basic else FINE_TO_BASIC_TAXONOMY
+    y_train = y_train_basic if is_basic else y_train_fine
+    y_val = y_val_basic if is_basic else y_val_fine
+    y_test = y_test_basic if is_basic else y_test_fine
 
-    num_classes = len(FINE_TO_ID)
+    run_tag = f"{model_type}_{embedding_type}_{target_level}_{'hid' if model_type == 'bilstm' else 'filt'}{param_value}"
+    logger.info(f"Starting run: {run_tag}")
 
     if embedding_type == 'fasttext':
         word_to_id, emb_matrix, embed_dim = build_fasttext_embedding(train_texts)
-        train_ds = FastTextDataset(train_texts, y_train_fine, word_to_id, max_len=max_len)
-        val_ds = FastTextDataset(val_texts, y_val_fine, word_to_id, max_len=max_len)
-        test_ds = FastTextDataset(test_texts, y_test_fine, word_to_id, max_len=max_len) if len(test_texts) > 0 else None
+        train_ds = FastTextDataset(train_texts, y_train, word_to_id, max_len=max_len)
+        val_ds = FastTextDataset(val_texts, y_val, word_to_id, max_len=max_len)
+        test_ds = FastTextDataset(test_texts, y_test, word_to_id, max_len=max_len) if len(test_texts) > 0 else None
         bert_mode = False
     elif embedding_type == 'indobert':
         tokenizer, bert_model, embed_dim = build_indobert_embedder(freeze=True)
-        train_ds = BertDataset(train_texts, y_train_fine, tokenizer, max_len=max_len)
-        val_ds = BertDataset(val_texts, y_val_fine, tokenizer, max_len=max_len)
-        test_ds = BertDataset(test_texts, y_test_fine, tokenizer, max_len=max_len) if len(test_texts) > 0 else None
+        train_ds = BertDataset(train_texts, y_train, tokenizer, max_len=max_len)
+        val_ds = BertDataset(val_texts, y_val, tokenizer, max_len=max_len)
+        test_ds = BertDataset(test_texts, y_test, tokenizer, max_len=max_len) if len(test_texts) > 0 else None
         bert_mode = True
     else:
         raise ValueError(f"Unknown embedding_type: {embedding_type}")
@@ -244,26 +250,36 @@ def train_single_run(
         train_loss = train_epoch(model, train_loader, optimizer, criterion, DEVICE, bert_mode=bert_mode)
         val_loss, y_val_true, y_val_pred = evaluate(model, val_loader, criterion, DEVICE, bert_mode=bert_mode)
 
-        val_metrics = compute_all_metrics_binary(y_val_true, y_val_pred, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
+        val_metrics = compute_all_metrics_binary(y_val_true, y_val_pred, id_to_class, class_to_parent)
         val_f1 = val_metrics['f1_macro']
 
-        # Derive basic predictions from fine-grained predictions via taxonomy
-        y_val_pred_basic = fine_to_basic_predictions(y_val_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
-        val_basic_metrics = compute_all_metrics_binary(y_val_basic, y_val_pred_basic, ID_TO_BASIC, {})
+        if is_basic:
+            logger.info(
+                f"Epoch {epoch:2d}/{num_epochs} | "
+                f"tr_loss={train_loss:.4f} | vl_loss={val_loss:.4f} | "
+                f"vl_f1_m={val_f1:.4f}"
+            )
+            mlflow.log_metrics({
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                **{f"val_{k}": v for k, v in val_metrics.items()},
+            }, step=epoch)
+        else:
+            y_val_pred_basic = fine_to_basic_predictions(y_val_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
+            val_basic_metrics = compute_all_metrics_binary(y_val_basic, y_val_pred_basic, ID_TO_BASIC, {})
 
-        logger.info(
-            f"Epoch {epoch:2d}/{num_epochs} | "
-            f"tr_loss={train_loss:.4f} | vl_loss={val_loss:.4f} | "
-            f"vl_f1_m={val_f1:.4f} | "
-            f"vl_basic_f1_m={val_basic_metrics['f1_macro']:.4f}"
-        )
-
-        mlflow.log_metrics({
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            **{f"val_{k}": v for k, v in val_metrics.items()},
-            **{f"val_basic_{k}": v for k, v in val_basic_metrics.items()},
-        }, step=epoch)
+            logger.info(
+                f"Epoch {epoch:2d}/{num_epochs} | "
+                f"tr_loss={train_loss:.4f} | vl_loss={val_loss:.4f} | "
+                f"vl_f1_m={val_f1:.4f} | "
+                f"vl_basic_f1_m={val_basic_metrics['f1_macro']:.4f}"
+            )
+            mlflow.log_metrics({
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                **{f"val_{k}": v for k, v in val_metrics.items()},
+                **{f"val_basic_{k}": v for k, v in val_basic_metrics.items()},
+            }, step=epoch)
 
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
@@ -282,34 +298,45 @@ def train_single_run(
 
     # Final validation evaluation with best model
     _, y_val_true, y_val_pred = evaluate(model, val_loader, criterion, DEVICE, bert_mode=bert_mode)
-    final_val_metrics = compute_all_metrics_binary(y_val_true, y_val_pred, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
-    y_val_pred_basic = fine_to_basic_predictions(y_val_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
-    final_val_basic = compute_all_metrics_binary(y_val_basic, y_val_pred_basic, ID_TO_BASIC, {})
-
+    final_val_metrics = compute_all_metrics_binary(y_val_true, y_val_pred, id_to_class, class_to_parent)
     for k, v in final_val_metrics.items():
         mlflow.log_metric(f"val_{k}", v)
-    for k, v in final_val_basic.items():
-        mlflow.log_metric(f"val_basic_{k}", v)
+    if not is_basic:
+        y_val_pred_basic = fine_to_basic_predictions(y_val_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
+        final_val_basic = compute_all_metrics_binary(y_val_basic, y_val_pred_basic, ID_TO_BASIC, {})
+        for k, v in final_val_basic.items():
+            mlflow.log_metric(f"val_basic_{k}", v)
 
     # Test evaluation
     if test_loader is not None and len(test_texts) > 0:
         _, y_test_true, y_test_pred = evaluate(model, test_loader, criterion, DEVICE, bert_mode=bert_mode)
-        test_metrics = compute_all_metrics_binary(y_test_true, y_test_pred, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
-        y_test_pred_basic = fine_to_basic_predictions(y_test_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
-        test_basic = compute_all_metrics_binary(y_test_basic, y_test_pred_basic, ID_TO_BASIC, {})
-
+        test_metrics = compute_all_metrics_binary(y_test_true, y_test_pred, id_to_class, class_to_parent)
         for k, v in test_metrics.items():
             mlflow.log_metric(f"test_{k}", v)
-        for k, v in test_basic.items():
-            mlflow.log_metric(f"test_basic_{k}", v)
+
+        if not is_basic:
+            y_test_pred_basic = fine_to_basic_predictions(y_test_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
+            test_basic = compute_all_metrics_binary(y_test_basic, y_test_pred_basic, ID_TO_BASIC, {})
+            for k, v in test_basic.items():
+                mlflow.log_metric(f"test_basic_{k}", v)
 
         analysis_dir = "analysis"
         os.makedirs(analysis_dir, exist_ok=True)
         analysis_path = os.path.join(analysis_dir, f"manual_analysis_{run_tag}.csv")
-        save_manual_analysis_binary(
-            test_texts, y_test_true, y_test_pred,
-            ID_TO_FINE, FINE_TO_BASIC_TAXONOMY, analysis_path,
-        )
+        if is_basic:
+            save_manual_analysis_binary(
+                test_texts, y_test_true, y_test_pred,
+                ID_TO_BASIC, {},
+                analysis_path,
+                y_true_extra=y_test_fine,
+                y_pred_extra=None,
+                id_to_extra=ID_TO_FINE,
+            )
+        else:
+            save_manual_analysis_binary(
+                test_texts, y_test_true, y_test_pred,
+                ID_TO_FINE, FINE_TO_BASIC_TAXONOMY, analysis_path,
+            )
         logger.info(f"Manual analysis exported to: {analysis_path}")
 
         logger.info(
@@ -380,52 +407,59 @@ def train_dl(data_path):
         FINE_TO_BASIC_TAXONOMY=FINE_TO_BASIC_TAXONOMY,
     )
 
-    for emb_type in embedding_configs:
-        # BiLSTM with fixed hidden_dim=128
-        run_tag = f"bilstm_{emb_type}"
-        with mlflow.start_run(run_name=run_tag):
-            mlflow.log_params({
-                "model_type": "bilstm",
-                "embedding_type": emb_type,
-                "embed_dim": 300 if emb_type == 'fasttext' else 768,
-                "hidden_dim": 128,
-                "batch_size": 32,
-                "learning_rate": 1e-3,
-            })
-            try:
-                train_single_run(
-                    embedding_type=emb_type,
-                    model_type='bilstm',
-                    param_value=128,
-                    **common_kwargs,
-                )
-            except Exception as e:
-                logger.error(f"Run {run_tag} FAILED: {e}")
-                mlflow.log_param("status", "failed")
-                mlflow.log_param("error", str(e))
+    target_levels = ['basic', 'fine']
 
-        # CNN with fixed num_filters=100 (Kim, 2014)
-        run_tag = f"cnn_{emb_type}"
-        with mlflow.start_run(run_name=run_tag):
-            mlflow.log_params({
-                "model_type": "cnn",
-                "embedding_type": emb_type,
-                "embed_dim": 300 if emb_type == 'fasttext' else 768,
-                "num_filters": 100,
-                "batch_size": 32,
-                "learning_rate": 1e-3,
-            })
-            try:
-                train_single_run(
-                    embedding_type=emb_type,
-                    model_type='cnn',
-                    param_value=100,
-                    **common_kwargs,
-                )
-            except Exception as e:
-                logger.error(f"Run {run_tag} FAILED: {e}")
-                mlflow.log_param("status", "failed")
-                mlflow.log_param("error", str(e))
+    for emb_type in embedding_configs:
+        for target in target_levels:
+            # BiLSTM with fixed hidden_dim=128
+            run_tag = f"bilstm_{emb_type}_{target}"
+            with mlflow.start_run(run_name=run_tag):
+                mlflow.log_params({
+                    "model_type": "bilstm",
+                    "embedding_type": emb_type,
+                    "embed_dim": 300 if emb_type == 'fasttext' else 768,
+                    "hidden_dim": 128,
+                    "target_level": target,
+                    "batch_size": 32,
+                    "learning_rate": 1e-3,
+                })
+                try:
+                    train_single_run(
+                        embedding_type=emb_type,
+                        model_type='bilstm',
+                        param_value=128,
+                        target_level=target,
+                        **common_kwargs,
+                    )
+                except Exception as e:
+                    logger.error(f"Run {run_tag} FAILED: {e}")
+                    mlflow.log_param("status", "failed")
+                    mlflow.log_param("error", str(e))
+
+            # CNN with fixed num_filters=100 (Kim, 2014)
+            run_tag = f"cnn_{emb_type}_{target}"
+            with mlflow.start_run(run_name=run_tag):
+                mlflow.log_params({
+                    "model_type": "cnn",
+                    "embedding_type": emb_type,
+                    "embed_dim": 300 if emb_type == 'fasttext' else 768,
+                    "num_filters": 100,
+                    "target_level": target,
+                    "batch_size": 32,
+                    "learning_rate": 1e-3,
+                })
+                try:
+                    train_single_run(
+                        embedding_type=emb_type,
+                        model_type='cnn',
+                        param_value=100,
+                        target_level=target,
+                        **common_kwargs,
+                    )
+                except Exception as e:
+                    logger.error(f"Run {run_tag} FAILED: {e}")
+                    mlflow.log_param("status", "failed")
+                    mlflow.log_param("error", str(e))
 
     logger.info("=== Deep Learning pipeline complete ===")
 

@@ -43,6 +43,8 @@ def train_transformers(data_path: str):
     batch_sizes = [16, 32]
     num_epochs = 3
 
+    target_levels = ['basic', 'fine']
+
     for model_name, model_id in models_to_train.items():
         logger.info(f"--- Starting model: {model_name} ({model_id}) ---")
 
@@ -55,114 +57,123 @@ def train_transformers(data_path: str):
         def tokenize_function(examples):
             return tokenizer(examples["preprocessed_text"], padding=False, truncation=True, max_length=128)
 
-        train_labels = y_train_fine.astype(np.float32).tolist()
-        val_labels = y_val_fine.astype(np.float32).tolist()
+        for target in target_levels:
+            is_basic = (target == 'basic')
+            num_labels = len(BASIC_TO_ID) if is_basic else len(FINE_TO_ID)
+            id_to_label = ID_TO_BASIC if is_basic else ID_TO_FINE
+            label_to_id = BASIC_TO_ID if is_basic else FINE_TO_ID
+            class_to_parent = {} if is_basic else FINE_TO_BASIC_TAXONOMY
+            y_train_labels = (y_train_basic if is_basic else y_train_fine).astype(np.float32).tolist()
+            y_val_labels = (y_val_basic if is_basic else y_val_fine).astype(np.float32).tolist()
+            y_test_labels = (y_test_basic if is_basic else y_test_fine).astype(np.float32).tolist()
 
-        train_dataset = HFDataset.from_dict({
-            "preprocessed_text": train_df["preprocessed_text"].tolist(),
-            "labels": train_labels,
-        })
-        val_dataset = HFDataset.from_dict({
-            "preprocessed_text": val_df["preprocessed_text"].tolist(),
-            "labels": val_labels,
-        })
+            logger.info(f"  Target level: {target} ({num_labels} labels)")
 
-        tokenized_train = train_dataset.map(tokenize_function, batched=True)
-        tokenized_val = val_dataset.map(tokenize_function, batched=True)
-
-        tokenized_test = None
-        if not test_df.empty:
-            test_labels = y_test_fine.astype(np.float32).tolist()
-            test_dataset = HFDataset.from_dict({
-                "preprocessed_text": test_df["preprocessed_text"].tolist(),
-                "labels": test_labels,
+            train_dataset = HFDataset.from_dict({
+                "preprocessed_text": train_df["preprocessed_text"].tolist(),
+                "labels": y_train_labels,
             })
-            tokenized_test = test_dataset.map(tokenize_function, batched=True)
+            val_dataset = HFDataset.from_dict({
+                "preprocessed_text": val_df["preprocessed_text"].tolist(),
+                "labels": y_val_labels,
+            })
 
-        data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+            tokenized_train = train_dataset.map(tokenize_function, batched=True)
+            tokenized_val = val_dataset.map(tokenize_function, batched=True)
 
-        def compute_metrics_hf(eval_pred):
-            logits, labels = eval_pred
-            probs = torch.sigmoid(torch.tensor(logits)).numpy()
-            preds = (probs >= 0.5).astype(np.int32)
-            return compute_all_metrics_binary(labels, preds, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
+            tokenized_test = None
+            if not test_df.empty:
+                test_dataset = HFDataset.from_dict({
+                    "preprocessed_text": test_df["preprocessed_text"].tolist(),
+                    "labels": y_test_labels,
+                })
+                tokenized_test = test_dataset.map(tokenize_function, batched=True)
 
-        for lr in learning_rates:
-            for bs in batch_sizes:
-                hpo_run_name = f"{model_name}_lr{lr}_bs{bs}"
-                logger.info(f"  Running HPO: {hpo_run_name}")
+            data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
-                try:
-                    model = AutoModelForSequenceClassification.from_pretrained(
-                        model_id,
-                        num_labels=46,
-                        problem_type="multi_label_classification",
-                        id2label=ID_TO_FINE,
-                        label2id=FINE_TO_ID,
-                    )
-                except Exception as e:
-                    logger.error(f"  Failed to load model for {hpo_run_name}: {e}")
-                    continue
+            def compute_metrics_hf(eval_pred, _id2label=id_to_label, _parent=class_to_parent):
+                logits, labels = eval_pred
+                probs = torch.sigmoid(torch.tensor(logits)).numpy()
+                preds = (probs >= 0.5).astype(np.int32)
+                return compute_all_metrics_binary(labels, preds, _id2label, _parent)
 
-                training_args = TrainingArguments(
-                    output_dir=f"./results/{hpo_run_name}",
-                    learning_rate=lr,
-                    per_device_train_batch_size=bs,
-                    per_device_eval_batch_size=bs,
-                    num_train_epochs=num_epochs,
-                    weight_decay=0.01,
-                    eval_strategy="epoch",
-                    save_strategy="epoch",
-                    load_best_model_at_end=True,
-                    metric_for_best_model="eval_f1_macro",
-                    report_to="mlflow",
-                    run_name=hpo_run_name,
-                )
+            for lr in learning_rates:
+                for bs in batch_sizes:
+                    hpo_run_name = f"{model_name}_{target}_lr{lr}_bs{bs}"
+                    logger.info(f"    Running HPO: {hpo_run_name}")
 
-                trainer = Trainer(
-                    model=model,
-                    args=training_args,
-                    train_dataset=tokenized_train,
-                    eval_dataset=tokenized_val,
-                    data_collator=data_collator,
-                    compute_metrics=compute_metrics_hf,
-                )
-
-                with mlflow.start_run(run_name=hpo_run_name):
-                    mlflow.log_param("model_id", model_id)
-                    mlflow.log_param("learning_rate", lr)
-                    mlflow.log_param("batch_size", bs)
-                    mlflow.log_param("num_epochs", num_epochs)
-
-                    trainer.train()
-
-                    if tokenized_test is not None:
-                        test_results = trainer.evaluate(tokenized_test, metric_key_prefix="test")
-                        logger.info(f"  {hpo_run_name} test results: {test_results}")
-
-                        with mlflow.start_run(run_name=f"{hpo_run_name}_test", nested=True):
-                            for key, value in test_results.items():
-                                if key.startswith("test_") and isinstance(value, (int, float)):
-                                    mlflow.log_metric(key.replace("test_", ""), value)
-
-                        preds_output = trainer.predict(tokenized_test)
-                        logits = preds_output.predictions
-                        probs = torch.sigmoid(torch.tensor(logits)).numpy()
-                        y_pred_binary = (probs >= 0.5).astype(np.int32)
-                        y_true_binary = preds_output.label_ids
-
-                        if not os.path.exists("analysis"):
-                            os.makedirs("analysis")
-                        analysis_path = f"analysis/manual_analysis_{hpo_run_name}.csv"
-                        save_manual_analysis_binary(
-                            test_df["text"].tolist(),
-                            y_true_binary,
-                            y_pred_binary,
-                            ID_TO_FINE,
-                            FINE_TO_BASIC_TAXONOMY,
-                            analysis_path,
+                    try:
+                        model = AutoModelForSequenceClassification.from_pretrained(
+                            model_id,
+                            num_labels=num_labels,
+                            problem_type="multi_label_classification",
+                            id2label=id_to_label,
+                            label2id=label_to_id,
                         )
-                        logger.info(f"  Manual analysis saved to: {analysis_path}")
+                    except Exception as e:
+                        logger.error(f"    Failed to load model for {hpo_run_name}: {e}")
+                        continue
+
+                    training_args = TrainingArguments(
+                        output_dir=f"./results/{hpo_run_name}",
+                        learning_rate=lr,
+                        per_device_train_batch_size=bs,
+                        per_device_eval_batch_size=bs,
+                        num_train_epochs=num_epochs,
+                        weight_decay=0.01,
+                        eval_strategy="epoch",
+                        save_strategy="epoch",
+                        load_best_model_at_end=True,
+                        metric_for_best_model="eval_f1_macro",
+                        report_to="mlflow",
+                        run_name=hpo_run_name,
+                    )
+
+                    trainer = Trainer(
+                        model=model,
+                        args=training_args,
+                        train_dataset=tokenized_train,
+                        eval_dataset=tokenized_val,
+                        data_collator=data_collator,
+                        compute_metrics=compute_metrics_hf,
+                    )
+
+                    with mlflow.start_run(run_name=hpo_run_name):
+                        mlflow.log_param("model_id", model_id)
+                        mlflow.log_param("target_level", target)
+                        mlflow.log_param("learning_rate", lr)
+                        mlflow.log_param("batch_size", bs)
+                        mlflow.log_param("num_epochs", num_epochs)
+
+                        trainer.train()
+
+                        if tokenized_test is not None:
+                            test_results = trainer.evaluate(tokenized_test, metric_key_prefix="test")
+                            logger.info(f"    {hpo_run_name} test results: {test_results}")
+
+                            with mlflow.start_run(run_name=f"{hpo_run_name}_test", nested=True):
+                                for key, value in test_results.items():
+                                    if key.startswith("test_") and isinstance(value, (int, float)):
+                                        mlflow.log_metric(key.replace("test_", ""), value)
+
+                            preds_output = trainer.predict(tokenized_test)
+                            logits = preds_output.predictions
+                            probs = torch.sigmoid(torch.tensor(logits)).numpy()
+                            y_pred_binary = (probs >= 0.5).astype(np.int32)
+                            y_true_binary = preds_output.label_ids
+
+                            if not os.path.exists("analysis"):
+                                os.makedirs("analysis")
+                            analysis_path = f"analysis/manual_analysis_{hpo_run_name}.csv"
+                            save_manual_analysis_binary(
+                                test_df["text"].tolist(),
+                                y_true_binary,
+                                y_pred_binary,
+                                id_to_label,
+                                class_to_parent,
+                                analysis_path,
+                            )
+                            logger.info(f"    Manual analysis saved to: {analysis_path}")
 
         logger.info(f"  All HPO runs for {model_name} completed.")
 

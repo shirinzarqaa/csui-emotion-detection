@@ -18,7 +18,7 @@ csui-emotion-detection/
 │   ├── traditional/
 │   │   └── traditional_pipeline.py  # 54 runs: BR/LP × Unigram/Bigram/Trigram × BoW/TF-IDF × LR/NB/SVM
 │   ├── deep_learning/
-│   │   ├── dl_pipeline.py    # 4 runs: FastText/IndoBERT × BiLSTM/CNN with fixed best-practice params
+│   │   ├── dl_pipeline.py    # 8 runs: FastText/IndoBERT × BiLSTM/CNN × basic/fine target levels
 │   │   └── models.py         # BiLSTM, TextCNN, FastTextDataset, BertDataset
 │   └── transformers/
 │       └── transformer_pipeline.py  # 40 HPO runs: 5 models × 4 LR × 2 batch sizes
@@ -123,7 +123,9 @@ Total: 3 scenarios × 6 features × 3 models = **54 runs**. Models logged to MLf
 
 ---
 
-## Pipeline: Deep Learning (4 runs)
+## Pipeline: Deep Learning (8 runs)
+
+Each model is trained **independently on both target levels** — basic labels (7 classes) and fine-grained labels (45 classes).
 
 ### Embedding
 
@@ -141,11 +143,20 @@ Two embedding approaches using best-practice fixed hyperparameters:
 | **Bi-LSTM** | hidden_dim=128, bidirectional, dropout=0.3 | Graves & Schmidhuber (2005) |
 | **CNN** | num_filters=100, filter_sizes=[3,4,5], dropout=0.3 | Kim (2014); Baihaqi et al. (2023) for Indonesian |
 
-Total: 2 embeddings × 2 models = **4 runs**. Training: BCEWithLogitsLoss, Adam(lr=1e-3), early stopping (patience=3). Models logged to MLflow via `mlflow.pytorch.log_model()`.
+### Target Levels
+
+| Level | Labels | Output |
+|---|---|---|
+| **basic** | 7 | Direct 7-label prediction |
+| **fine** | 45 | Direct 45-label prediction; basic derived via taxonomy mapping |
+
+Total: 2 embeddings × 2 models × 2 target levels = **8 runs**. Training: BCEWithLogitsLoss, Adam(lr=1e-3), early stopping (patience=3). Models logged to MLflow via `mlflow.pytorch.log_model()`.
 
 ---
 
-## Pipeline: Transformers (40 HPO runs)
+## Pipeline: Transformers (80 HPO runs)
+
+Each model is fine-tuned **independently on both target levels** — basic labels (7 classes) and fine-grained labels (45 classes).
 
 ### HuggingFace Models
 
@@ -157,13 +168,13 @@ Total: 2 embeddings × 2 models = **4 runs**. Training: BCEWithLogitsLoss, Adam(
 | **XLM-R** | `xlm-roberta-base` | SentencePiece BPE |
 | **mmBERT** | `jhu-clsp/mmBERT-base` | WordPiece |
 
-### HPO Grid
+### HPO Grid (per target level per model)
 
 - Learning rates: `[2e-5, 3e-5, 4e-5, 5e-5]`
 - Batch sizes: `[16, 32]`
 - Training: 3 epochs, weight_decay=0.01, `problem_type="multi_label_classification"`
 
-Total: 5 models × 4 LR × 2 BS = **40 runs**. Checkpoints auto-logged to MLflow via `report_to="mlflow"`.
+Total: 5 models × 2 target levels × 4 LR × 2 BS = **80 runs**. Checkpoints auto-logged to MLflow via `report_to="mlflow"`.
 
 ---
 
@@ -185,10 +196,10 @@ This starts **3 independent containers** running in parallel:
 | Container | Pipeline | MLflow Experiment | Runs |
 |---|---|---|---|
 | `pipeline-traditional` | Traditional ML | `Traditional_ML_MultiLabel` | 54 |
-| `pipeline-dl` | Deep Learning | `Deep_Learning_MultiLabel` | 4 |
-| `pipeline-transformers` | Transformers | `Transformer_MultiLabel` | 40 |
+| `pipeline-dl` | Deep Learning | `Deep_Learning_MultiLabel` | 8 |
+| `pipeline-transformers` | Transformers | `Transformer_MultiLabel` | 80 |
 
-All write to the same MLflow server. Total: **98 concurrent runs**.
+All write to the same MLflow server. Total: **142 concurrent runs**.
 
 ### Run a Single Pipeline Only
 
