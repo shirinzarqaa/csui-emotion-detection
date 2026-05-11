@@ -7,17 +7,17 @@ services:
     ports:
       - "8002:8002"
     command: >
-      mlflow server 
-      --host 0.0.0.0 
-      --port 8002 
-      --backend-store-uri sqlite:////mlflow_data/mlflow.db 
+      mlflow server
+      --host 0.0.0.0
+      --port 8002
+      --backend-store-uri sqlite:////mlflow_data/mlflow.db
       --default-artifact-root /mlflow_data/artifacts
     volumes:
       - ./mlflow_data:/mlflow_data
-  
-  pipeline:
+
+  traditional:
     build: .
-    container_name: emotion_pipeline
+    container_name: pipeline-traditional
     environment:
       - MLFLOW_TRACKING_URI=http://mlflow-server:8002
     volumes:
@@ -25,8 +25,34 @@ services:
       - ./src:/app/src
       - ./run_pipeline.py:/app/run_pipeline.py
     working_dir: /app
+    command: ["python", "run_pipeline.py", "--run", "traditional"]
     depends_on:
       - mlflow-server
-    # Since we want to let the user run it on-demand, or interactive:
-    stdin_open: true # docker run -i
-    tty: true        # docker run -t
+
+  deep-learning:
+    build: .
+    container_name: pipeline-dl
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server:8002
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./run_pipeline.py:/app/run_pipeline.py
+    working_dir: /app
+    command: ["python", "run_pipeline.py", "--run", "dl"]
+    depends_on:
+      - mlflow-server
+
+  transformers:
+    build: .
+    container_name: pipeline-transformers
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server:8002
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./run_pipeline.py:/app/run_pipeline.py
+    working_dir: /app
+    command: ["python", "run_pipeline.py", "--run", "transformers"]
+    depends_on:
+      - mlflow-server

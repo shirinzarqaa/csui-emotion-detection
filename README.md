@@ -49,7 +49,7 @@ Taxonomy ini dibangun dari analisis baris single-label (27.794 dari 32.598 data)
 
 ## Data Format
 
-Dataset **NOT included** in this repository (`data/*.json` is `.gitignore`d). Provide your own `data/new_all.json` (derived from `new_all.xlsx`):
+Place `new_all.json` in the `data/` folder (committed to repo, derived from `new_all.xlsx`):
 
 ```json
 [
@@ -79,6 +79,7 @@ Pipeline reads `new_label_basic` / `new_label_fine_grained` automatically via `s
 | Remove stopwords | ✅ | ❌ | ❌ |
 
 Slang dictionary (125+ mappings) dan Indonesian stopwords (200+ words) di `src/utils/preprocessing.py`.
+Berasal dari praktik terbaik NLP Bahasa Indonesia — sesuaikan dengan referensi tesis Anda.
 
 ---
 
@@ -130,10 +131,12 @@ Total: 3 skenario × 6 fitur × 3 model = **54 run**. Model di-log ke MLflow via
 
 ### Embedding
 
-| Embedding | Dimensi | Karakteristik |
-|---|---|---|
-| **FastText** (cc.id.300.vec) | 300-dim | Subword information (character n-gram), handles OOV, cocok untuk morfologi Bahasa Indonesia |
-| **IndoBERT** (indolem/indobert-base-uncased) | 768-dim | Pre-trained contextual embedding, froze untuk feature extraction |
+Two different embedding approaches tested as ablation study:
+
+| Embedding | Dimensi | Source | Why chosen |
+|---|---|---|---|
+| **FastText** (cc.id.300.vec) | 300-dim | Facebook pre-trained Indonesian vectors | Subword info (char n-grams) → handles OOV & morphologically rich languages like Indonesian. Not contextual but lightweight. |
+| **IndoBERT** (indolem/indobert-base-uncased) | 768-dim | IndoLEM pre-trained | Contextual embeddings capturing sentence-level semantics. Frozen for feature extraction to keep training fast. |
 
 ### Architecture & Ablation
 
@@ -170,33 +173,60 @@ Total: 5 model × 4 LR × 2 BS = **40 run**. Checkpoints di-log ke MLflow otomat
 
 ## Cara Menjalankan
 
+### Docker (Parallel — Semua Pipeline Sekaligus)
+
 ```bash
-# Install dependensi
+# Jalankan MLflow + 3 pipeline containers secara paralel:
+docker-compose up --build
+
+# Monitoring:
+# - MLflow UI: http://localhost:8002
+# - Container logs: docker-compose logs -f
+```
+
+Ini akan menjalankan **3 container terpisah**:
+| Container | Pipeline | Eksperimen MLflow |
+|---|---|---|
+| `pipeline-traditional` | Traditional ML (54 run) | `Traditional_ML_MultiLabel` |
+| `pipeline-dl` | Deep Learning (12 run) | `Deep_Learning_MultiLabel` |
+| `pipeline-transformers` | Transformers (40 run) | `Transformer_MultiLabel` |
+
+Semua pipeline berjalan **paralel**, menulis ke MLflow server yang sama. Total 106 run.
+
+### Menjalankan Satu Pipeline Saja
+
+```bash
+docker-compose up traditional       # Hanya Traditional ML
+docker-compose up deep-learning     # Hanya Deep Learning
+docker-compose up transformers      # Hanya Transformers
+```
+
+### Local (without Docker)
+
+```bash
 pip install -r requirements.txt
 pip install loguru
 
-# Semua pipeline (54 + 12 + 40 = 106 total run):
+# All pipelines sequentially:
 python run_pipeline.py --data_path ./data/new_all.json --run all
 
 # Individual:
-python run_pipeline.py --run traditional    # 54 run
-python run_pipeline.py --run dl              # 12 run
-python run_pipeline.py --run transformers    # 40 run
+python run_pipeline.py --run traditional
+python run_pipeline.py --run dl
+python run_pipeline.py --run transformers
 
-# Atau langsung per pipeline:
+# Or directly:
 python -m src.traditional.traditional_pipeline --data_path ./data/new_all.json
-python -m src.deep_learning.dl_pipeline --data_path ./data/new_all.json
-python -m src.transformers.transformer_pipeline --data_path ./data/new_all.json
 ```
 
 ### Monitoring MLflow
 ```bash
 mlflow ui
-# Buka http://localhost:5000
+# Open http://localhost:5000 (local) or http://localhost:8002 (Docker)
 ```
 
-### Analisis Manual
-Setelah setiap run, CSV error analysis otomatis di-generate ke folder `analysis/` dengan kolom: `Text`, `True_Basic`, `True_Fine`, `Pred_Basic`, `Pred_Fine`, `Status`.
+### Manual Analysis
+After each run, CSV error analysis is automatically generated in `analysis/` with columns: `Text`, `True_Basic`, `True_Fine`, `Pred_Basic`, `Pred_Fine`, `Status`.
 
 ---
 
