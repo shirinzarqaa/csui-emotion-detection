@@ -47,6 +47,26 @@ Taxonomy ini dibangun dari analisis baris single-label (27.794 dari 32.598 data)
 
 ---
 
+## Data Format
+
+Dataset **NOT included** in this repository (`data/*.json` is `.gitignore`d). Provide your own `data/new_all.json` (derived from `new_all.xlsx`):
+
+```json
+[
+  {
+    "id": 1,
+    "text": "bang , ada foto rumah nya ga...",
+    "new_label_basic": "Love,Sadness",
+    "new_label_fine_grained": "Attraction,Suffering",
+    "splitting": "train"
+  }
+]
+```
+
+Pipeline reads `new_label_basic` / `new_label_fine_grained` automatically via `src/data_loader.py`.
+
+---
+
 ## Preprocessing (3 Mode)
 
 | Step | Traditional | Deep Learning | Transformers |
