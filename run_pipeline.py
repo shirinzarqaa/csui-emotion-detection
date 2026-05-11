@@ -8,7 +8,7 @@ from src.transformers.transformer_pipeline import train_transformers
 
 def main():
     parser = argparse.ArgumentParser(description="10-Model Emission Classification Pipeline Orchestrator")
-    parser.add_argument("--data_path", type=str, default="./data/dataset.json", help="Path to input JSON data")
+    parser.add_argument("--data_path", type=str, default="./data/new_all.json", help="Path to input JSON data")
     parser.add_argument("--run", type=str, choices=["traditional", "dl", "transformers", "all"], default="all",
                         help="Which pipeline to run. Choose one: traditional, dl, transformers, all (default)")
                         

@@ -1,82 +1,87 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import numpy as np
-import collections
+import torch.nn.functional as F
+from torch.utils.data import Dataset
 
-class TextDataset(Dataset):
-    def __init__(self, texts, labels, vocab=None, max_len=100):
-        self.texts = texts
-        self.labels = labels
-        self.max_len = max_len
-        
-        if vocab is None:
-            self.vocab = self.build_vocab(texts)
-        else:
-            self.vocab = vocab
-            
-        self.encoded_texts = [self.encode(t) for t in texts]
-        
-    def build_vocab(self, texts):
-        words = [word for text in texts for word in str(text).split()]
-        counter = collections.Counter(words)
-        vocab = {w: i+2 for i, (w, _) in enumerate(counter.most_common(20000))}
-        vocab['<PAD>'] = 0
-        vocab['<UNK>'] = 1
-        return vocab
-        
-    def encode(self, text):
-        words = str(text).split()
-        encoded = [self.vocab.get(w, self.vocab['<UNK>']) for w in words]
-        if len(encoded) < self.max_len:
-            encoded += [self.vocab['<PAD>']] * (self.max_len - len(encoded))
-        else:
-            encoded = encoded[:self.max_len]
-        return encoded
-        
-    def __len__(self):
-        return len(self.texts)
-        
-    def __getitem__(self, idx):
-        return torch.tensor(self.encoded_texts[idx], dtype=torch.long), torch.tensor(self.labels[idx], dtype=torch.long)
 
 class BiLSTM(nn.Module):
-    def __init__(self, vocab_size, embed_dim, hidden_dim, num_classes):
+    """Bidirectional LSTM head for sequence embeddings → multi-label logits."""
+    def __init__(self, embed_dim, hidden_dim, num_classes, dropout=0.3, num_layers=1):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.lstm = nn.LSTM(
+            embed_dim, hidden_dim,
+            num_layers=num_layers,
+            bidirectional=True,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+        )
+        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_dim * 2, num_classes)
-        
-    def forward(self, x):
-        embedded = self.embedding(x)
-        # output shape: (batch_size, seq_len, hidden_dim*2)
-        lstm_out, _ = self.lstm(embedded)
-        # Getting the last output representations
-        final_state = lstm_out[:, -1, :] 
-        out = self.fc(final_state)
-        return out
+
+    def forward(self, embeddings):
+        lstm_out, _ = self.lstm(embeddings)
+        final = lstm_out[:, -1, :]
+        return self.fc(self.dropout(final))
+
 
 class TextCNN(nn.Module):
-    def __init__(self, vocab_size, embed_dim, num_classes, num_filters=100, filter_sizes=[3,4,5]):
+    """TextCNN head for sequence embeddings → multi-label logits."""
+    def __init__(self, embed_dim, num_classes, num_filters=100, filter_sizes=(3, 4, 5), dropout=0.3):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.convs = nn.ModuleList([
-            nn.Conv2d(1, num_filters, (fs, embed_dim)) for fs in filter_sizes
+            nn.Conv1d(embed_dim, num_filters, fs, padding=fs // 2) for fs in filter_sizes
         ])
+        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(len(filter_sizes) * num_filters, num_classes)
-        
-    def forward(self, x):
-        # x shape: (batch_size, seq_len)
-        embedded = self.embedding(x).unsqueeze(1) 
-        # embedded shape: (batch_size, 1, seq_len, embed_dim)
-        
-        import torch.nn.functional as F
-        conved = [F.relu(conv(embedded)).squeeze(3) for conv in self.convs]
-        # conved[n] shape: (batch_size, num_filters, seq_len - fs + 1)
-        
-        pooled = [F.max_pool1d(conv, conv.shape[2]).squeeze(2) for conv in conved]
-        # pooled[n] shape: (batch_size, num_filters)
-        
+
+    def forward(self, embeddings):
+        x = embeddings.transpose(1, 2)
+        pooled = []
+        for conv in self.convs:
+            c = F.relu(conv(x))
+            p = F.max_pool1d(c, c.shape[2]).squeeze(2)
+            pooled.append(p)
         cat = torch.cat(pooled, dim=1)
-        out = self.fc(cat)
-        return out
+        return self.fc(self.dropout(cat))
+
+
+class FastTextDataset(Dataset):
+    """Dataset that encodes texts as word-index sequences for FastText embedding lookup."""
+    def __init__(self, texts, labels, word_to_id, max_len=128):
+        self.encoded_texts = []
+        for t in texts:
+            ids = [word_to_id.get(w, word_to_id.get('<UNK>', 1)) for w in str(t).split()]
+            if len(ids) > max_len:
+                ids = ids[:max_len]
+            else:
+                ids += [word_to_id.get('<PAD>', 0)] * (max_len - len(ids))
+            self.encoded_texts.append(ids)
+        self.labels = torch.tensor(labels, dtype=torch.float)
+
+    def __len__(self):
+        return len(self.encoded_texts)
+
+    def __getitem__(self, idx):
+        return torch.tensor(self.encoded_texts[idx], dtype=torch.long), self.labels[idx]
+
+
+class BertDataset(Dataset):
+    """Dataset that tokenizes texts on-the-fly with an IndoBERT tokenizer."""
+    def __init__(self, texts, labels, tokenizer, max_len=128):
+        self.texts = texts
+        self.labels = torch.tensor(labels, dtype=torch.float)
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        encoding = self.tokenizer(
+            self.texts[idx],
+            padding='max_length',
+            truncation=True,
+            max_length=self.max_len,
+            return_tensors='pt',
+        )
+        return encoding['input_ids'].squeeze(0), encoding['attention_mask'].squeeze(0), self.labels[idx]

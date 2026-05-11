@@ -1,145 +1,178 @@
 import os
 import argparse
-import mlflow
+import numpy as np
 import torch
+import mlflow
 from datasets import Dataset as HFDataset
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments, DataCollatorWithPadding
-import os
 from loguru import logger
 
 from src.data_loader import prepare_data
-from src.utils.metrics import compute_all_metrics, save_manual_analysis
+from src.utils.preprocessing import preprocess_for_transformers
+from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
+
 
 def train_transformers(data_path: str):
-    logger.info("Loading Data...")
-    train_df, val_df, test_df, class_to_id, id_to_class, fine_to_basic = prepare_data(data_path)
-    
-    # Closure for metric evaluation to pass dictionary maps
-    def compute_metrics_hf(eval_pred):
-        logits, labels = eval_pred
-        predictions = logits.argmax(axis=-1)
-        
-        metrics = compute_all_metrics(labels, predictions, id_to_class, fine_to_basic)
-        return metrics
-    
-    # Standard HF Dataset preparation
-    train_dataset = HFDataset.from_pandas(train_df[['text', 'label_id']])
-    val_dataset = HFDataset.from_pandas(val_df[['text', 'label_id']])
-    test_dataset = HFDataset.from_pandas(test_df[['text', 'label_id']]) if not test_df.empty else None
-    
-    num_classes = len(class_to_id)
-    
+    logger.info("Loading data...")
+    (
+        train_df, val_df, test_df,
+        y_train_basic, y_val_basic, y_test_basic,
+        y_train_fine, y_val_fine, y_test_fine,
+        BASIC_TO_ID, ID_TO_BASIC,
+        FINE_TO_ID, ID_TO_FINE,
+        FINE_TO_BASIC_TAXONOMY,
+    ) = prepare_data(data_path)
+
+    logger.info("Preprocessing texts...")
+    train_df["preprocessed_text"] = train_df["text"].apply(preprocess_for_transformers)
+    val_df["preprocessed_text"] = val_df["text"].apply(preprocess_for_transformers)
+    if not test_df.empty:
+        test_df["preprocessed_text"] = test_df["text"].apply(preprocess_for_transformers)
+
     models_to_train = {
-        "IndoBERT_IndoNLU": "indobenchmark/indobert-base-p1",
-        "IndoBERT_IndoLEM": "indolem/indobert-base-uncased",
-        "IndoBERTtweet": "indolem/indobertweet-base-uncased",
+        "IndoBERT": "indobenchmark/indobert-base-p1",
+        "IndoBERT-LEM": "indolem/indobert-base-uncased",
+        "IndoBERTweet": "indolem/indobertweet-base-uncased",
         "XLM-R": "xlm-roberta-base",
-        "mmBERT": "jhu-clsp/mmBERT-base"
+        "mmBERT": "jhu-clsp/mmBERT-base",
     }
-    
-    mlflow.set_experiment("Transformer_Models")
+
+    mlflow.set_experiment("Transformer_MultiLabel")
+
+    learning_rates = [2e-5, 3e-5, 4e-5, 5e-5]
+    batch_sizes = [16, 32]
+    num_epochs = 3
 
     for model_name, model_id in models_to_train.items():
-        logger.info(f"Training {model_name} from {model_id}...")
-        
-        # In case some models error out, we continue
+        logger.info(f"--- Starting model: {model_name} ({model_id}) ---")
+
         try:
-            # Tokenizer remains the same across hyperparameter variations
             tokenizer = AutoTokenizer.from_pretrained(model_id)
-            
-            def tokenize_function(examples):
-                return tokenizer(examples["text"], padding=False, truncation=True, max_length=128)
-
-            tokenized_train = train_dataset.map(tokenize_function, batched=True).rename_column("label_id", "labels")
-            tokenized_val = val_dataset.map(tokenize_function, batched=True).rename_column("label_id", "labels")
-            if test_dataset:
-                tokenized_test = test_dataset.map(tokenize_function, batched=True).rename_column("label_id", "labels")
-
-            data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-            # ---------------------------------------------------------
-            # HYPERPARAMETER OPTIMIZATION (HPO) GRID
-            # Adjust these to find the best performing model configuration!
-            # ---------------------------------------------------------
-            # Menggunakan standar deviasi learning rate rekomendasi Devlin et al. (2019)
-            learning_rates = [2e-5, 3e-5, 4e-5, 5e-5] 
-            batch_sizes = [16, 32]        # Evaluates gradient stability
-            
-            for lr in learning_rates:
-                for bs in batch_sizes:
-                    hpo_run_name = f"{model_name}_lr{lr}_bs{bs}"
-                    logger.info(f"--- Running HPO configuration: {hpo_run_name} ---")
-                    
-                    # We MUST load a fresh model each iteration to prevent catastrophic logic collision
-                    # where models resume training off the previously trained iteration
-                    model = AutoModelForSequenceClassification.from_pretrained(
-                        model_id, 
-                        num_labels=num_classes,
-                        id2label=id_to_class,
-                        label2id=class_to_id
-                    )
-
-                    # Hyperparameters based on literature configurations for fine-tuning PLMs
-                    training_args = TrainingArguments(
-                        output_dir=f"./results/{hpo_run_name}",
-                        # Dynamic parameter injection based on loop
-                        learning_rate=lr,  
-                        per_device_train_batch_size=bs,
-                        per_device_eval_batch_size=bs,
-                        # Moderate epochs to achieve convergence without heavy overfitting
-                        num_train_epochs=3,
-                        weight_decay=0.01,
-                        eval_strategy="epoch",
-                        save_strategy="epoch",
-                        load_best_model_at_end=True,
-                        metric_for_best_model="f1_macro",
-                        # Log automatically to mlflow
-                        report_to="mlflow",
-                        run_name=hpo_run_name
-                    )
-                    
-                    trainer = Trainer(
-                        model=model,
-                        args=training_args,
-                        train_dataset=tokenized_train,
-                        eval_dataset=tokenized_val,
-                        tokenizer=tokenizer,
-                        data_collator=data_collator,
-                        compute_metrics=compute_metrics_hf,
-                    )
-
-                    # Start run to ensure it falls under our custom experiment name cleanly
-                    with mlflow.start_run(run_name=hpo_run_name):
-                        mlflow.log_param("model_id", model_id)
-                        trainer.train()
-                        
-                        # Evaluate on test set
-                        if test_dataset:
-                            test_results = trainer.evaluate(tokenized_test, metric_key_prefix="test")
-                            logger.info(f"{hpo_run_name} Test Results: {test_results}")
-
-                            # Save Manual Analysis by running predictions via trainer manually
-                            preds = trainer.predict(tokenized_test)
-                            predicted_labels = preds.predictions.argmax(axis=-1)
-                            actual_labels = preds.label_ids
-                            
-                            if not os.path.exists("analysis"):
-                                os.makedirs("analysis")
-                            analysis_path = f"analysis/manual_analysis_{hpo_run_name}.csv"
-                            save_manual_analysis(test_df['text'].values, actual_labels, predicted_labels, id_to_class, fine_to_basic, analysis_path)
-                            logger.info(f"Manual analysis exported to: {analysis_path}")
-
-            logger.info(f"All HPO combinations for {model_name} completed successfully.")
-            
         except Exception as e:
-            logger.error(f"Failed to train {model_name}: {e}")
+            logger.error(f"Failed to load tokenizer for {model_name}: {e}")
+            continue
+
+        def tokenize_function(examples):
+            return tokenizer(examples["preprocessed_text"], padding=False, truncation=True, max_length=128)
+
+        train_labels = y_train_fine.astype(np.float32).tolist()
+        val_labels = y_val_fine.astype(np.float32).tolist()
+
+        train_dataset = HFDataset.from_dict({
+            "preprocessed_text": train_df["preprocessed_text"].tolist(),
+            "labels": train_labels,
+        })
+        val_dataset = HFDataset.from_dict({
+            "preprocessed_text": val_df["preprocessed_text"].tolist(),
+            "labels": val_labels,
+        })
+
+        tokenized_train = train_dataset.map(tokenize_function, batched=True)
+        tokenized_val = val_dataset.map(tokenize_function, batched=True)
+
+        tokenized_test = None
+        if not test_df.empty:
+            test_labels = y_test_fine.astype(np.float32).tolist()
+            test_dataset = HFDataset.from_dict({
+                "preprocessed_text": test_df["preprocessed_text"].tolist(),
+                "labels": test_labels,
+            })
+            tokenized_test = test_dataset.map(tokenize_function, batched=True)
+
+        data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+        def compute_metrics_hf(eval_pred):
+            logits, labels = eval_pred
+            probs = torch.sigmoid(torch.tensor(logits)).numpy()
+            preds = (probs >= 0.5).astype(np.int32)
+            return compute_all_metrics_binary(labels, preds, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
+
+        for lr in learning_rates:
+            for bs in batch_sizes:
+                hpo_run_name = f"{model_name}_lr{lr}_bs{bs}"
+                logger.info(f"  Running HPO: {hpo_run_name}")
+
+                try:
+                    model = AutoModelForSequenceClassification.from_pretrained(
+                        model_id,
+                        num_labels=46,
+                        problem_type="multi_label_classification",
+                        id2label=ID_TO_FINE,
+                        label2id=FINE_TO_ID,
+                    )
+                except Exception as e:
+                    logger.error(f"  Failed to load model for {hpo_run_name}: {e}")
+                    continue
+
+                training_args = TrainingArguments(
+                    output_dir=f"./results/{hpo_run_name}",
+                    learning_rate=lr,
+                    per_device_train_batch_size=bs,
+                    per_device_eval_batch_size=bs,
+                    num_train_epochs=num_epochs,
+                    weight_decay=0.01,
+                    eval_strategy="epoch",
+                    save_strategy="epoch",
+                    load_best_model_at_end=True,
+                    metric_for_best_model="eval_f1_macro",
+                    report_to="mlflow",
+                    run_name=hpo_run_name,
+                )
+
+                trainer = Trainer(
+                    model=model,
+                    args=training_args,
+                    train_dataset=tokenized_train,
+                    eval_dataset=tokenized_val,
+                    data_collator=data_collator,
+                    compute_metrics=compute_metrics_hf,
+                )
+
+                with mlflow.start_run(run_name=hpo_run_name):
+                    mlflow.log_param("model_id", model_id)
+                    mlflow.log_param("learning_rate", lr)
+                    mlflow.log_param("batch_size", bs)
+                    mlflow.log_param("num_epochs", num_epochs)
+
+                    trainer.train()
+
+                    if tokenized_test is not None:
+                        test_results = trainer.evaluate(tokenized_test, metric_key_prefix="test")
+                        logger.info(f"  {hpo_run_name} test results: {test_results}")
+
+                        with mlflow.start_run(run_name=f"{hpo_run_name}_test", nested=True):
+                            for key, value in test_results.items():
+                                if key.startswith("test_") and isinstance(value, (int, float)):
+                                    mlflow.log_metric(key.replace("test_", ""), value)
+
+                        preds_output = trainer.predict(tokenized_test)
+                        logits = preds_output.predictions
+                        probs = torch.sigmoid(torch.tensor(logits)).numpy()
+                        y_pred_binary = (probs >= 0.5).astype(np.int32)
+                        y_true_binary = preds_output.label_ids
+
+                        if not os.path.exists("analysis"):
+                            os.makedirs("analysis")
+                        analysis_path = f"analysis/manual_analysis_{hpo_run_name}.csv"
+                        save_manual_analysis_binary(
+                            test_df["text"].tolist(),
+                            y_true_binary,
+                            y_pred_binary,
+                            ID_TO_FINE,
+                            FINE_TO_BASIC_TAXONOMY,
+                            analysis_path,
+                        )
+                        logger.info(f"  Manual analysis saved to: {analysis_path}")
+
+        logger.info(f"  All HPO runs for {model_name} completed.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, required=True)
     args = parser.parse_args()
-    
+
     import sys
-    logger.add(sys.stdout, format="{time} {level} {message}", filter="my_module", level="INFO")
-    
+    logger.add(sys.stdout, format="{time} {level} {message}", level="INFO")
+
     train_transformers(args.data_path)
