@@ -328,7 +328,7 @@ def train_single_run(
     return best_val_f1
 
 
-def run_ablation(data_path):
+def train_dl(data_path):
     logger.info("=== Deep Learning Multi-Label Emotion Classification ===")
     logger.info(f"Device: {DEVICE}")
 
@@ -357,10 +357,11 @@ def run_ablation(data_path):
 
     mlflow.set_experiment("Deep_Learning_MultiLabel")
 
+    # Best-practice hyperparameters from literature:
+    #   BiLSTM: hidden_dim=128 (Graves & Schmidhuber, 2005)
+    #   CNN: num_filters=100, filter_sizes=[3,4,5] (Kim, 2014)
+    #   Baihaqi et al. (2023) for Indonesian emotion CNN
     embedding_configs = ['fasttext', 'indobert']
-
-    bilstm_params = [64, 128, 256]
-    cnn_params = [50, 100, 150]
 
     common_kwargs = dict(
         train_texts=train_texts,
@@ -380,53 +381,53 @@ def run_ablation(data_path):
     )
 
     for emb_type in embedding_configs:
-        for hid in bilstm_params:
-            run_tag = f"bilstm_{emb_type}_hid{hid}"
-            with mlflow.start_run(run_name=run_tag):
-                mlflow.log_params({
-                    "model_type": "bilstm",
-                    "embedding_type": emb_type,
-                    "embed_dim": 300 if emb_type == 'fasttext' else 768,
-                    "hidden_dim": hid,
-                    "batch_size": 32,
-                    "learning_rate": 1e-3,
-                })
-                try:
-                    train_single_run(
-                        embedding_type=emb_type,
-                        model_type='bilstm',
-                        param_value=hid,
-                        **common_kwargs,
-                    )
-                except Exception as e:
-                    logger.error(f"Run {run_tag} FAILED: {e}")
-                    mlflow.log_param("status", "failed")
-                    mlflow.log_param("error", str(e))
+        # BiLSTM with fixed hidden_dim=128
+        run_tag = f"bilstm_{emb_type}"
+        with mlflow.start_run(run_name=run_tag):
+            mlflow.log_params({
+                "model_type": "bilstm",
+                "embedding_type": emb_type,
+                "embed_dim": 300 if emb_type == 'fasttext' else 768,
+                "hidden_dim": 128,
+                "batch_size": 32,
+                "learning_rate": 1e-3,
+            })
+            try:
+                train_single_run(
+                    embedding_type=emb_type,
+                    model_type='bilstm',
+                    param_value=128,
+                    **common_kwargs,
+                )
+            except Exception as e:
+                logger.error(f"Run {run_tag} FAILED: {e}")
+                mlflow.log_param("status", "failed")
+                mlflow.log_param("error", str(e))
 
-        for filt in cnn_params:
-            run_tag = f"cnn_{emb_type}_filt{filt}"
-            with mlflow.start_run(run_name=run_tag):
-                mlflow.log_params({
-                    "model_type": "cnn",
-                    "embedding_type": emb_type,
-                    "embed_dim": 300 if emb_type == 'fasttext' else 768,
-                    "num_filters": filt,
-                    "batch_size": 32,
-                    "learning_rate": 1e-3,
-                })
-                try:
-                    train_single_run(
-                        embedding_type=emb_type,
-                        model_type='cnn',
-                        param_value=filt,
-                        **common_kwargs,
-                    )
-                except Exception as e:
-                    logger.error(f"Run {run_tag} FAILED: {e}")
-                    mlflow.log_param("status", "failed")
-                    mlflow.log_param("error", str(e))
+        # CNN with fixed num_filters=100 (Kim, 2014)
+        run_tag = f"cnn_{emb_type}"
+        with mlflow.start_run(run_name=run_tag):
+            mlflow.log_params({
+                "model_type": "cnn",
+                "embedding_type": emb_type,
+                "embed_dim": 300 if emb_type == 'fasttext' else 768,
+                "num_filters": 100,
+                "batch_size": 32,
+                "learning_rate": 1e-3,
+            })
+            try:
+                train_single_run(
+                    embedding_type=emb_type,
+                    model_type='cnn',
+                    param_value=100,
+                    **common_kwargs,
+                )
+            except Exception as e:
+                logger.error(f"Run {run_tag} FAILED: {e}")
+                mlflow.log_param("status", "failed")
+                mlflow.log_param("error", str(e))
 
-    logger.info("=== Ablation study complete ===")
+    logger.info("=== Deep Learning pipeline complete ===")
 
 
 if __name__ == '__main__':
@@ -435,4 +436,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     logger.add(sys.stdout, format="{time} {level} {message}", level="INFO")
-    run_ablation(args.data_path)
+    train_dl(args.data_path)

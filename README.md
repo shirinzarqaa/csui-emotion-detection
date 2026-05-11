@@ -18,7 +18,7 @@ csui-emotion-detection/
 │   ├── traditional/
 │   │   └── traditional_pipeline.py  # 54 runs: BR/LP × Unigram/Bigram/Trigram × BoW/TF-IDF × LR/NB/SVM
 │   ├── deep_learning/
-│   │   ├── dl_pipeline.py    # 12 runs: FastText/IndoBERT × BiLSTM/CNN ablation study
+│   │   ├── dl_pipeline.py    # 4 runs: FastText/IndoBERT × BiLSTM/CNN with fixed best-practice params
 │   │   └── models.py         # BiLSTM, TextCNN, FastTextDataset, BertDataset
 │   └── transformers/
 │       └── transformer_pipeline.py  # 40 HPO runs: 5 models × 4 LR × 2 batch sizes
@@ -123,25 +123,25 @@ Total: 3 scenarios × 6 features × 3 models = **54 runs**. Models logged to MLf
 
 ---
 
-## Pipeline: Deep Learning (12 runs)
+## Pipeline: Deep Learning (4 runs)
 
 ### Embedding
 
-Two embedding approaches tested in ablation:
+Two embedding approaches using best-practice fixed hyperparameters:
 
 | Embedding | Dimension | Source | Rationale |
 |---|---|---|---|
-| **FastText** (cc.id.300.vec) | 300-dim | Facebook pre-trained Indonesian vectors | Subword info (char n-grams) handles OOV and morphologically rich languages. Lightweight, not contextual. |
-| **IndoBERT** (indolem/indobert-base-uncased) | 768-dim | IndoLEM pre-trained | Contextual embeddings capturing sentence-level semantics. Frozen for feature extraction to keep training fast. |
+| **FastText** (cc.id.300.vec) | 300-dim | Facebook pre-trained Indonesian vectors | Subword info (char n-grams) handles OOV and morphologically rich languages (Conneau et al., 2020). Lightweight, not contextual. |
+| **IndoBERT** (indolem/indobert-base-uncased) | 768-dim | IndoLEM pre-trained (Koto et al., 2020) | Contextual embeddings capturing sentence-level semantics. Frozen for feature extraction. |
 
-### Architecture & Ablation
+### Architecture (Fixed Best-Practice Hyperparameters)
 
-| Model | Ablation Variants |
-|---|---|
-| **Bi-LSTM** | hidden_dims = [64, 128, 256] |
-| **CNN** | num_filters = [50, 100, 150] |
+| Model | Configuration | Reference |
+|---|---|---|
+| **Bi-LSTM** | hidden_dim=128, bidirectional, dropout=0.3 | Graves & Schmidhuber (2005) |
+| **CNN** | num_filters=100, filter_sizes=[3,4,5], dropout=0.3 | Kim (2014); Baihaqi et al. (2023) for Indonesian |
 
-Total: 2 embeddings × (3 BiLSTM + 3 CNN) = **12 runs**. Training: BCEWithLogitsLoss, Adam(lr=1e-3), early stopping (patience=3). Models logged to MLflow via `mlflow.pytorch.log_model()`.
+Total: 2 embeddings × 2 models = **4 runs**. Training: BCEWithLogitsLoss, Adam(lr=1e-3), early stopping (patience=3). Models logged to MLflow via `mlflow.pytorch.log_model()`.
 
 ---
 
@@ -185,10 +185,10 @@ This starts **3 independent containers** running in parallel:
 | Container | Pipeline | MLflow Experiment | Runs |
 |---|---|---|---|
 | `pipeline-traditional` | Traditional ML | `Traditional_ML_MultiLabel` | 54 |
-| `pipeline-dl` | Deep Learning | `Deep_Learning_MultiLabel` | 12 |
+| `pipeline-dl` | Deep Learning | `Deep_Learning_MultiLabel` | 4 |
 | `pipeline-transformers` | Transformers | `Transformer_MultiLabel` | 40 |
 
-All write to the same MLflow server. Total: **106 concurrent runs**.
+All write to the same MLflow server. Total: **98 concurrent runs**.
 
 ### Run a Single Pipeline Only
 
