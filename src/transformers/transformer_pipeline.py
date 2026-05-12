@@ -21,7 +21,7 @@ def train_transformers(data_path: str):
         BASIC_TO_ID, ID_TO_BASIC,
         FINE_TO_ID, ID_TO_FINE,
         FINE_TO_BASIC_TAXONOMY,
-    ) = prepare_data(data_path)
+    ) = prepare_data(data_path, preprocessing_mode='transformers')
 
     logger.info("Using preprocessed text from data_loader...")
 

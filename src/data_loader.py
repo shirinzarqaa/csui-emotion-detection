@@ -2,7 +2,7 @@ import json
 import pandas as pd
 import numpy as np
 from typing import Tuple, Dict, List
-from src.utils.preprocessing import preprocess_for_traditional
+from src.utils.preprocessing import preprocess_for_traditional, preprocess_for_deep_learning, preprocess_for_transformers
 
 FINE_TO_BASIC_TAXONOMY = {
     'acceptance': 'joy',
@@ -106,11 +106,17 @@ def get_splits(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFra
     return train, val, test
 
 
-def prepare_data(filepath: str, use_fine_grained: bool = True):
+def prepare_data(filepath: str, use_fine_grained: bool = True, preprocessing_mode: str = 'traditional'):
     df = load_data(filepath)
     
-    # PREPROCESSING SEBELUM SPLIT (flow user)
-    df['preprocessed_text'] = df['text'].apply(preprocess_for_traditional)
+    # PREPROCESSING SEBELUM SPLIT (flow user) - mode berbeda per pipeline
+    preprocess_fn = {
+        'traditional': preprocess_for_traditional,
+        'deep_learning': preprocess_for_deep_learning,
+        'transformers': preprocess_for_transformers,
+    }[preprocessing_mode]
+    
+    df['preprocessed_text'] = df['text'].apply(preprocess_fn)
     
     train_df, val_df, test_df = get_splits(df)
 

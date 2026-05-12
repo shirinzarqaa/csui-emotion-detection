@@ -77,7 +77,7 @@ def train_traditional(data_path: str):
         BASIC_TO_ID, ID_TO_BASIC,
         FINE_TO_ID, ID_TO_FINE,
         FINE_TO_BASIC_TAXONOMY,
-    ) = prepare_data(data_path)
+    ) = prepare_data(data_path, preprocessing_mode='traditional')
 
     logger.info("Using preprocessed text from data_loader...")
     train_texts = train_df['preprocessed_text'].tolist()
