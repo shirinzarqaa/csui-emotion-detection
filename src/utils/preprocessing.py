@@ -21,6 +21,46 @@ USERNAME_PATTERN = re.compile(r'\[USERNAME\]|@\w+', re.IGNORECASE)
 HASHTAG_PATTERN = re.compile(r'#\w+')
 
 
+def _replace_url_token(text: str) -> str:
+    return URL_PATTERN.sub(' <URL> ', text)
+
+
+def _replace_username_token(text: str) -> str:
+    return USERNAME_PATTERN.sub(' <USER> ', text)
+
+
+_SPECIAL_TOKEN_MAP = {
+    'SPECIALURLTOKEN': '<URL>',
+    'SPECIALUSERTOKEN': '<USER>',
+}
+
+
+def _protect_special_tokens(text: str) -> str:
+    for placeholder, special in _SPECIAL_TOKEN_MAP.items():
+        text = text.replace(special, f' {placeholder} ')
+    return text
+
+
+def _restore_special_tokens(text: str) -> str:
+    for placeholder, special in _SPECIAL_TOKEN_MAP.items():
+        text = text.replace(placeholder, special)
+    return text
+
+
+def _restore_special_tokens_in_tokens(tokens: list) -> list:
+    result = []
+    for tok in tokens:
+        key = tok.lower()
+        if key in ('<user>', '<url>', 'specialusertoken', 'specialurltoken', 'user', 'url'):
+            if key in ('<user>', 'specialusertoken', 'user'):
+                result.append('<USER>')
+            else:
+                result.append('<URL>')
+        else:
+            result.append(tok)
+    return result
+
+
 def _convert_emoji(text: str) -> str:
     text = emoji.demojize(text, language='id')
     text = text.replace('_', ' ')
@@ -41,8 +81,8 @@ def _convert_emoticon(text: str) -> str:
 
 def preprocess_text(
     text: str,
-    remove_url: bool = True,
-    remove_username: bool = True,
+    replace_url: bool = True,
+    replace_username: bool = True,
     remove_hashtag: bool = True,
     convert_emoji: bool = True,
     convert_emoticon: bool = True,
@@ -58,11 +98,11 @@ def preprocess_text(
     if lowercase:
         text = text.lower()
 
-    if remove_url:
-        text = URL_PATTERN.sub('', text)
+    if replace_url:
+        text = _replace_url_token(text)
 
-    if remove_username:
-        text = USERNAME_PATTERN.sub('', text)
+    if replace_username:
+        text = _replace_username_token(text)
 
     if remove_hashtag:
         text = HASHTAG_PATTERN.sub('', text)
@@ -73,13 +113,21 @@ def preprocess_text(
     if convert_emoticon:
         text = _convert_emoticon(text)
 
+    text = _protect_special_tokens(text)
+
     if normalize_slang:
         text = saka.normalize(text)
 
+    text = _restore_special_tokens(text)
+
     tokens = saka.tokenize(text)
+    tokens = _restore_special_tokens_in_tokens(tokens)
 
     clean_tokens = []
     for tok in tokens:
+        if tok in ('<USER>', '<URL>'):
+            clean_tokens.append(tok)
+            continue
         if remove_stopword and tok.lower() in _STOPWORDS:
             continue
         if not any(c.isalpha() for c in tok):
@@ -101,8 +149,8 @@ def preprocess_text(
 def preprocess_for_traditional(text: str) -> str:
     return preprocess_text(
         text,
-        remove_url=True,
-        remove_username=True,
+        replace_url=True,
+        replace_username=True,
         remove_hashtag=True,
         convert_emoji=True,
         convert_emoticon=True,
@@ -115,8 +163,8 @@ def preprocess_for_traditional(text: str) -> str:
 def preprocess_for_deep_learning(text: str) -> str:
     return preprocess_text(
         text,
-        remove_url=False,
-        remove_username=False,
+        replace_url=True,
+        replace_username=True,
         remove_hashtag=False,
         convert_emoji=True,
         convert_emoticon=True,
@@ -129,8 +177,8 @@ def preprocess_for_deep_learning(text: str) -> str:
 def preprocess_for_transformers(text: str) -> str:
     return preprocess_text(
         text,
-        remove_url=True,
-        remove_username=True,
+        replace_url=True,
+        replace_username=True,
         remove_hashtag=True,
         convert_emoji=False,
         convert_emoticon=False,

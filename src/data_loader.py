@@ -1,21 +1,8 @@
 import json
-import warnings
 import pandas as pd
 import numpy as np
 from typing import Tuple, Dict, List
 from src.utils.preprocessing import preprocess_for_traditional, preprocess_for_deep_learning, preprocess_for_transformers
-
-# ═══════════════════════════════════════════════════════════════════
-# NOTE: "no emotion" label (basic + fine-grained)
-# ═══════════════════════════════════════════════════════════════════
-# The training split has 0 samples labeled "no emotion".
-# It only appears in val (4 samples) and test (6 samples).
-# The label is KEPT in the label set for completeness, but:
-#   - No model can learn a class with 0 training examples
-#   - The "no emotion" column in y_train will always be all zeros
-#   - Predictions for "no emotion" are expected to be near-random
-#   - This limitation must be documented in the thesis
-# ═══════════════════════════════════════════════════════════════════
 
 FINE_TO_BASIC_TAXONOMY = {
     'acceptance': 'joy',
@@ -47,7 +34,6 @@ FINE_TO_BASIC_TAXONOMY = {
     'love': 'love',
     'lust': 'love',
     'nervousness': 'fear',
-    'no emotion': 'no emotion',
     'nonsexual desire': 'love',
     'optimism': 'joy',
     'pensiveness': 'sadness',
@@ -121,17 +107,6 @@ def get_splits(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFra
 
 def prepare_data(filepath: str, use_fine_grained: bool = True, preprocessing_mode: str = 'traditional'):
     df = load_data(filepath)
-
-    if 'no emotion' in BASIC_LABELS:
-        no_emo_id = BASIC_TO_ID.get('no emotion')
-        if no_emo_id is not None:
-            warnings.warn(
-                "\"no emotion\" label has 0 training examples. "
-                "Models cannot learn this class — predictions will be near-random. "
-                "This limitation must be documented in the thesis.",
-                UserWarning,
-                stacklevel=2,
-            )
     
     # PREPROCESSING SEBELUM SPLIT (flow user) - mode berbeda per pipeline
     preprocess_fn = {

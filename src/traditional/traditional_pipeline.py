@@ -23,6 +23,8 @@ class LabelPowersetConverter:
         self.class_to_str = {}
         self.str_to_class = {}
 
+    _NO_LABEL = '__NO_LABEL__'
+
     def fit(self, y_binary):
         seen = set()
         class_idx = 0
@@ -31,13 +33,16 @@ class LabelPowersetConverter:
                 [self.id_to_label[i] for i, val in enumerate(row) if val == 1]
             ))
             if not active_labels:
-                active_labels = ('__NO_LABEL__',)
+                active_labels = (self._NO_LABEL,)
             if active_labels not in seen:
                 seen.add(active_labels)
-                combo_str = ','.join(active_labels) if active_labels[0] != '__NO_LABEL__' else '__NO_LABEL__'
+                combo_str = ','.join(active_labels) if active_labels[0] != self._NO_LABEL else self._NO_LABEL
                 self.class_to_str[class_idx] = combo_str
                 self.str_to_class[combo_str] = class_idx
                 class_idx += 1
+        if self._NO_LABEL not in self.str_to_class:
+            self.class_to_str[class_idx] = self._NO_LABEL
+            self.str_to_class[self._NO_LABEL] = class_idx
         return self
 
     def transform(self, y_binary):
@@ -47,17 +52,20 @@ class LabelPowersetConverter:
                 [self.id_to_label[i] for i, val in enumerate(row) if val == 1]
             ))
             if not active_labels:
-                active_labels = ('__NO_LABEL__',)
-            combo_str = ','.join(active_labels) if active_labels[0] != '__NO_LABEL__' else '__NO_LABEL__'
-            result.append(self.str_to_class.get(combo_str, -1))
+                combo_str = self._NO_LABEL
+            else:
+                combo_str = ','.join(active_labels)
+            if combo_str not in self.str_to_class:
+                combo_str = self._NO_LABEL
+            result.append(self.str_to_class[combo_str])
         return np.array(result)
 
     def inverse_transform(self, y_int):
         n_labels = len(self.label_to_id)
         result = np.zeros((len(y_int), n_labels), dtype=np.int32)
         for i, cls in enumerate(y_int):
-            combo_str = self.class_to_str.get(cls, '__NO_LABEL__')
-            if combo_str != '__NO_LABEL__':
+            combo_str = self.class_to_str.get(cls, '')
+            if combo_str and combo_str != self._NO_LABEL:
                 for label in combo_str.split(','):
                     if label in self.label_to_id:
                         result[i, self.label_to_id[label]] = 1

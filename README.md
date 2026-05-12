@@ -11,7 +11,7 @@ csui-emotion-detection/
 ├── data/
 │   └── new_all.json          # Primary dataset (32,598 samples)
 ├── src/
-│   ├── data_loader.py        # Multi-label parsing: new_label_basic (7 labels) → new_label_fine_grained (45 labels)
+│   ├── data_loader.py        # Multi-label parsing: new_label_basic (6 labels) → new_label_fine_grained (44 labels)
 │   ├── utils/
 │   │   ├── metrics.py        # Evaluation: f1-macro/micro/weighted, hamming loss, subset accuracy, per-label F1
 │   │   ├── preprocessing.py  # 3 preprocessing modes: traditional, DL, transformers
@@ -34,7 +34,7 @@ csui-emotion-detection/
 
 ## Label Taxonomy (Hierarchical)
 
-| Basic (7) | Fine-grained (45) |
+| Basic (6) | Fine-grained (44) |
 |---|---|
 | **anger** | aggressiveness, annoyance, disapproval, disgust, rage |
 | **fear** | anticipation, distrust, fear, fears-confirmed, nervousness, restlessness, submission, worry |
@@ -42,9 +42,8 @@ csui-emotion-detection/
 | **love** | attraction, caring, longing, love, lust, nonsexual desire |
 | **sadness** | broken-heart, compassion, embarrassment, feeling moved, grief, hopelessness, pensiveness, pity, remorse, suffering |
 | **surprise** | confusion, realization, surprise |
-| **no emotion** | no emotion |
 
-> **Known limitation — "no emotion" label**: The training split has **0 samples** labeled "no emotion" (it only appears in val: 4, test: 6). The label is kept in the label set for completeness, but no model can learn a class with zero training examples. Predictions for "no emotion" are expected to be near-random. This limitation is documented in `src/data_loader.py` and a runtime warning is issued. This must be acknowledged in the thesis.
+> **Note — "no emotion" removed**: The original dataset includes a "no emotion" label, but it has **0 training examples** (only 4 in val, 6 in test). Since no model can learn a class with zero training examples, it has been removed from the label set. Samples previously labeled only "no emotion" are now mapped to the closest available label during parsing.
 
 ---
 
@@ -115,7 +114,7 @@ Each pipeline computes **5 core metrics** + per-label F1:
 | **F1-Micro** | Global F1 (aggregates all labels) |
 | **F1-Weighted** | Per-label F1 weighted by label frequency |
 
-Per-label F1 scores are also reported for all 45 fine-grained labels. All metrics are logged to MLflow.
+Per-label F1 scores are also reported for all 44 fine-grained labels. All metrics are logged to MLflow.
 
 ---
 
@@ -167,9 +166,9 @@ Each run is tagged with `phase: experimentation` or `phase: final_test`.
 
 | Scenario | Target | Strategy |
 |---|---|---|
-| **BR_Basic** | 7 basic labels | Binary Relevance: 6 independent classifiers |
-| **LP_Basic** | 7 basic labels | Label Powerset: multi-label combo → single multi-class |
-| **BR_Fine** | 45 fine-grained labels | Binary Relevance: 45 independent classifiers |
+| **BR_Basic** | 6 basic labels | Binary Relevance: 6 independent classifiers |
+| **LP_Basic** | 6 basic labels | Label Powerset: multi-label combo → single multi-class |
+| **BR_Fine** | 44 fine-grained labels | Binary Relevance: 44 independent classifiers |
 
 ### Feature Extraction & Classifiers (6 combinations × 3 models = 18 runs per scenario)
 
@@ -188,7 +187,7 @@ Total: 3 scenarios × 6 features × 3 models = **54 runs**. Models logged to MLf
 
 ## Pipeline: Deep Learning (8 runs)
 
-Each model is trained **independently on both target levels** — basic labels (7 classes) and fine-grained labels (45 classes).
+Each model is trained **independently on both target levels** — basic labels (6 classes) and fine-grained labels (44 classes).
 
 ### Embedding
 
@@ -211,7 +210,7 @@ Two embedding approaches using best-practice fixed hyperparameters:
 | Level | Labels | Output |
 |---|---|---|
 | **basic** | 6 | Direct 6-label prediction |
-| **fine** | 45 | Direct 45-label prediction; basic derived via taxonomy mapping |
+| **fine** | 44 | Direct 44-label prediction; basic derived via taxonomy mapping |
 
 Total: 2 embeddings × 2 models × 2 target levels = **8 runs**. Training: BCEWithLogitsLoss, Adam(lr=1e-3), early stopping (patience=3). Models logged to MLflow via `mlflow.pytorch.log_model()`.
 
@@ -219,7 +218,7 @@ Total: 2 embeddings × 2 models × 2 target levels = **8 runs**. Training: BCEWi
 
 ## Pipeline: Transformers (80 HPO runs)
 
-Each model is fine-tuned **independently on both target levels** — basic labels (7 classes) and fine-grained labels (45 classes).
+Each model is fine-tuned **independently on both target levels** — basic labels (6 classes) and fine-grained labels (44 classes).
 
 ### HuggingFace Models
 
