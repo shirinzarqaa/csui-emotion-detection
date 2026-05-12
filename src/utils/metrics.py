@@ -99,6 +99,8 @@ def save_manual_analysis_binary(texts, y_true, y_pred, id_to_class, class_to_par
 
     df = pd.DataFrame(records)
     df.to_csv(output_path, index=False)
+    xlsx_path = output_path.rsplit('.', 1)[0] + '.xlsx'
+    df.to_excel(xlsx_path, index=False, engine='openpyxl')
     return output_path
 
 
@@ -124,10 +126,7 @@ def save_manual_analysis(texts, y_true, y_pred, id_to_fine, fine_to_basic, outpu
 
     df = pd.DataFrame(records)
     df.to_csv(output_path, index=False)
+    xlsx_path = output_path.rsplit('.', 1)[0] + '.xlsx'
+    df.to_excel(xlsx_path, index=False, engine='openpyxl')
     return output_path
-
-
-
-
-
 

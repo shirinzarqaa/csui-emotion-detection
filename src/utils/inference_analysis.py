@@ -95,6 +95,8 @@ def run_inference_and_analysis(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = os.path.join(output_dir, f"deep_analysis_{pipeline_name}_{timestamp}.csv")
     df.to_csv(csv_path, index=False, encoding='utf-8')
+    xlsx_path = os.path.join(output_dir, f"deep_analysis_{pipeline_name}_{timestamp}.xlsx")
+    df.to_excel(xlsx_path, index=False, engine='openpyxl')
 
     summary_path = os.path.join(output_dir, f"deep_analysis_summary_{pipeline_name}_{timestamp}.txt")
     with open(summary_path, 'w', encoding='utf-8') as f:
@@ -123,9 +125,12 @@ def run_inference_and_analysis(
     hard_df = df[hard_mask].sort_values('confidence')
     hard_path = os.path.join(output_dir, f"hard_samples_{pipeline_name}_{timestamp}.csv")
     hard_df.to_csv(hard_path, index=False, encoding='utf-8')
+    hard_xlsx = os.path.join(output_dir, f"hard_samples_{pipeline_name}_{timestamp}.xlsx")
+    hard_df.to_excel(hard_xlsx, index=False, engine='openpyxl')
 
     print(f"Deep analysis: {csv_path}")
     print(f"Hard samples:  {hard_path} ({len(hard_df)} samples)")
+    print(f"XLSX:          {xlsx_path}")
     print(f"Summary:       {summary_path}")
 
     return df
@@ -167,6 +172,8 @@ def compare_across_pipelines(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(output_dir, f"cross_pipeline_comparison_{timestamp}.csv")
     df_compare.to_csv(path, index=False, encoding='utf-8')
+    xlsx_path = os.path.join(output_dir, f"cross_pipeline_comparison_{timestamp}.xlsx")
+    df_compare.to_excel(xlsx_path, index=False, engine='openpyxl')
 
     print(f"\nCross-pipeline comparison: {path}")
     print(f"  All exact match:   {df_compare['all_exact'].sum()}")
