@@ -7,8 +7,9 @@ scikit-learn
 pandas
 numpy
 mlflow
-Sastrawi
+saka-nlp
 emoji
+emot
 tqdm
 accelerate
 loguru
