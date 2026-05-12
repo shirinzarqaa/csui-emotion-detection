@@ -10,6 +10,7 @@ mlflow
 saka-nlp
 emoji
 emot
+openpyxl
 tqdm
 accelerate
 loguru
