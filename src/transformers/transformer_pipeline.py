@@ -1,6 +1,7 @@
 import os
 import argparse
 import numpy as np
+import pandas as pd
 import torch
 import mlflow
 from datasets import Dataset as HFDataset
@@ -8,7 +9,6 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trai
 from loguru import logger
 
 from src.data_loader import prepare_data
-from src.utils.preprocessing import preprocess_for_transformers
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
 
 
@@ -23,8 +23,6 @@ def train_transformers(data_path: str):
         FINE_TO_BASIC_TAXONOMY,
     ) = prepare_data(data_path, preprocessing_mode='transformers')
 
-    logger.info("Using preprocessed text from data_loader...")
-
     models_to_train = {
         "IndoBERT": "indobenchmark/indobert-base-p1",
         "IndoBERT-LEM": "indolem/indobert-base-uncased",
@@ -33,13 +31,17 @@ def train_transformers(data_path: str):
         "mmBERT": "jhu-clsp/mmBERT-base",
     }
 
-    mlflow.set_experiment("Transformer_MultiLabel")
-
     learning_rates = [2e-5, 3e-5, 4e-5, 5e-5]
     batch_sizes = [16, 32]
     num_epochs = 3
-
     target_levels = ['basic', 'fine']
+
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 1: EXPERIMENTATION — val metrics only, NO test
+    # ═══════════════════════════════════════════════════════════════
+    mlflow.set_experiment("Transformer_MultiLabel")
+    phase1_results = []
+    logger.info("PHASE 1: Experimentation runs (val metrics only)...")
 
     for model_name, model_id in models_to_train.items():
         logger.info(f"--- Starting model: {model_name} ({model_id}) ---")
@@ -61,30 +63,20 @@ def train_transformers(data_path: str):
             class_to_parent = {} if is_basic else FINE_TO_BASIC_TAXONOMY
             y_train_labels = (y_train_basic if is_basic else y_train_fine).astype(np.float32).tolist()
             y_val_labels = (y_val_basic if is_basic else y_val_fine).astype(np.float32).tolist()
-            y_test_labels = (y_test_basic if is_basic else y_test_fine).astype(np.float32).tolist()
 
             logger.info(f"  Target level: {target} ({num_labels} labels)")
 
             train_dataset = HFDataset.from_dict({
-                "preprocessed_text": train_df["preprocessed_text"].tolist(),
+                "text": train_df["preprocessed_text"].tolist(),
                 "labels": y_train_labels,
             })
             val_dataset = HFDataset.from_dict({
-                "preprocessed_text": val_df["preprocessed_text"].tolist(),
+                "text": val_df["preprocessed_text"].tolist(),
                 "labels": y_val_labels,
             })
 
             tokenized_train = train_dataset.map(tokenize_function, batched=True)
             tokenized_val = val_dataset.map(tokenize_function, batched=True)
-
-            tokenized_test = None
-            if not test_df.empty:
-                test_dataset = HFDataset.from_dict({
-                    "preprocessed_text": test_df["preprocessed_text"].tolist(),
-                    "labels": y_test_labels,
-                })
-                tokenized_test = test_dataset.map(tokenize_function, batched=True)
-
             data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
             def compute_metrics_hf(eval_pred, _id2label=id_to_label, _parent=class_to_parent):
@@ -96,7 +88,7 @@ def train_transformers(data_path: str):
             for lr in learning_rates:
                 for bs in batch_sizes:
                     hpo_run_name = f"{model_name}_{target}_lr{lr}_bs{bs}"
-                    logger.info(f"    Running HPO: {hpo_run_name}")
+                    logger.info(f"    Phase 1: {hpo_run_name}")
 
                     try:
                         model = AutoModelForSequenceClassification.from_pretrained(
@@ -135,6 +127,7 @@ def train_transformers(data_path: str):
                     )
 
                     with mlflow.start_run(run_name=hpo_run_name):
+                        mlflow.set_tag("phase", "experimentation")
                         mlflow.log_param("model_id", model_id)
                         mlflow.log_param("target_level", target)
                         mlflow.log_param("learning_rate", lr)
@@ -143,35 +136,183 @@ def train_transformers(data_path: str):
 
                         trainer.train()
 
-                        if tokenized_test is not None:
-                            test_results = trainer.evaluate(tokenized_test, metric_key_prefix="test")
-                            logger.info(f"    {hpo_run_name} test results: {test_results}")
+                        val_results = trainer.evaluate(tokenized_val, metric_key_prefix="val")
+                        val_f1_macro = val_results.get("val_f1_macro", -1.0)
 
-                            with mlflow.start_run(run_name=f"{hpo_run_name}_test", nested=True):
-                                for key, value in test_results.items():
-                                    if key.startswith("test_") and isinstance(value, (int, float)):
-                                        mlflow.log_metric(key.replace("test_", ""), value)
+                        for key, value in val_results.items():
+                            if key.startswith("val_") and isinstance(value, (int, float)):
+                                mlflow.log_metric(key, value)
 
-                            preds_output = trainer.predict(tokenized_test)
-                            logits = preds_output.predictions
-                            probs = torch.sigmoid(torch.tensor(logits)).numpy()
-                            y_pred_binary = (probs >= 0.5).astype(np.int32)
-                            y_true_binary = preds_output.label_ids
+                        preds_output = trainer.predict(tokenized_val)
+                        val_logits = preds_output.predictions
+                        val_probs = torch.sigmoid(torch.tensor(val_logits)).numpy()
+                        y_val_pred = (val_probs >= 0.5).astype(np.int32)
+                        y_val_true = preds_output.label_ids
 
-                            if not os.path.exists("analysis"):
-                                os.makedirs("analysis")
-                            analysis_path = f"analysis/manual_analysis_{hpo_run_name}.csv"
-                            save_manual_analysis_binary(
-                                test_df["text"].tolist(),
-                                y_true_binary,
-                                y_pred_binary,
-                                id_to_label,
-                                class_to_parent,
-                                analysis_path,
-                            )
-                            logger.info(f"    Manual analysis saved to: {analysis_path}")
+                        os.makedirs("analysis", exist_ok=True)
+                        val_analysis_path = f"analysis/val_analysis_{hpo_run_name}.csv"
+                        save_manual_analysis_binary(
+                            val_df["text"].tolist(),
+                            y_val_true,
+                            y_val_pred,
+                            id_to_label,
+                            class_to_parent,
+                            val_analysis_path,
+                        )
 
-        logger.info(f"  All HPO runs for {model_name} completed.")
+                        phase1_results.append({
+                            'model_name': model_name,
+                            'model_id': model_id,
+                            'target_level': target,
+                            'learning_rate': lr,
+                            'batch_size': bs,
+                            'val_f1_macro': val_f1_macro,
+                        })
+
+                        logger.info(f"    {hpo_run_name} | Val F1-Macro: {val_f1_macro:.4f}")
+
+        logger.info(f"  All Phase 1 HPO runs for {model_name} completed.")
+
+    logger.info(f"\nPHASE 1 complete. {len(phase1_results)} runs logged (val metrics only).")
+
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 2: FINAL REPORT — retrain best on train+val, test ONCE
+    # ═══════════════════════════════════════════════════════════════
+    mlflow.set_experiment("Transformer_Final_Test")
+    logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per model+target)...")
+
+    train_val_df = pd.concat([train_df, val_df], ignore_index=True)
+    test_texts_raw = test_df["text"].tolist()
+
+    for model_name, model_id in models_to_train.items():
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+        except Exception as e:
+            logger.error(f"Phase 2: Failed to load tokenizer for {model_name}: {e}")
+            continue
+
+        def tokenize_function_tv(examples):
+            return tokenizer(examples["text"], padding=False, truncation=True, max_length=128)
+
+        for target in target_levels:
+            model_target_results = [
+                r for r in phase1_results
+                if r['model_name'] == model_name and r['target_level'] == target
+            ]
+            if not model_target_results:
+                logger.warning(f"No Phase 1 results for {model_name}/{target}, skipping.")
+                continue
+
+            best = max(model_target_results, key=lambda x: x['val_f1_macro'])
+            logger.info(f"Best {model_name}/{target}: lr={best['learning_rate']}, bs={best['batch_size']} "
+                         f"(val F1-Macro: {best['val_f1_macro']:.4f})")
+
+            is_basic = (target == 'basic')
+            num_labels = len(BASIC_TO_ID) if is_basic else len(FINE_TO_ID)
+            id_to_label = ID_TO_BASIC if is_basic else ID_TO_FINE
+            label_to_id = BASIC_TO_ID if is_basic else FINE_TO_ID
+            class_to_parent = {} if is_basic else FINE_TO_BASIC_TAXONOMY
+
+            y_train_val_basic = np.concatenate([y_train_basic, y_val_basic], axis=0).astype(np.float32)
+            y_train_val_fine = np.concatenate([y_train_fine, y_val_fine], axis=0).astype(np.float32)
+            y_train_val_labels = (y_train_val_basic if is_basic else y_train_val_fine).tolist()
+            y_test_labels = (y_test_basic if is_basic else y_test_fine).astype(np.float32).tolist()
+
+            train_val_dataset = HFDataset.from_dict({
+                "text": train_val_df["preprocessed_text"].tolist(),
+                "labels": y_train_val_labels,
+            })
+            test_dataset = HFDataset.from_dict({
+                "text": test_df["preprocessed_text"].tolist(),
+                "labels": y_test_labels,
+            })
+
+            tokenized_train_val = train_val_dataset.map(tokenize_function_tv, batched=True)
+            tokenized_test = test_dataset.map(tokenize_function_tv, batched=True)
+
+            data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+            try:
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    model_id,
+                    num_labels=num_labels,
+                    problem_type="multi_label_classification",
+                    id2label=id_to_label,
+                    label2id=label_to_id,
+                )
+            except Exception as e:
+                logger.error(f"Phase 2: Failed to load model for {model_name}/{target}: {e}")
+                continue
+
+            final_run_name = f"FINAL_{model_name}_{target}_lr{best['learning_rate']}_bs{best['batch_size']}"
+            training_args = TrainingArguments(
+                output_dir=f"./results/{final_run_name}",
+                learning_rate=best['learning_rate'],
+                per_device_train_batch_size=best['batch_size'],
+                per_device_eval_batch_size=best['batch_size'],
+                num_train_epochs=num_epochs,
+                weight_decay=0.01,
+                eval_strategy="no",
+                save_strategy="no",
+                report_to="mlflow",
+                run_name=final_run_name,
+            )
+
+            trainer = Trainer(
+                model=model,
+                args=training_args,
+                train_dataset=tokenized_train_val,
+                data_collator=data_collator,
+            )
+
+            with mlflow.start_run(run_name=final_run_name):
+                mlflow.set_tag("phase", "final_test")
+                mlflow.log_params({
+                    "model_id": model_id,
+                    "target_level": target,
+                    "learning_rate": best['learning_rate'],
+                    "batch_size": best['batch_size'],
+                    "num_epochs": num_epochs,
+                    "selected_by_val_f1_macro": best['val_f1_macro'],
+                })
+
+                logger.info(f"Phase 2: Fine-tuning {final_run_name} on train+val ({len(train_val_df)} samples)...")
+                trainer.train()
+
+                logger.info(f"Phase 2: Predicting on test set...")
+                preds_output = trainer.predict(tokenized_test)
+                logits = preds_output.predictions
+                probs = torch.sigmoid(torch.tensor(logits)).numpy()
+                y_pred_binary = (probs >= 0.5).astype(np.int32)
+                y_true_binary = preds_output.label_ids
+
+                test_metrics = compute_all_metrics_binary(y_true_binary, y_pred_binary, id_to_label, class_to_parent)
+                for k, v in test_metrics.items():
+                    mlflow.log_metric(f"test_{k}", v)
+
+                os.makedirs("analysis", exist_ok=True)
+                analysis_path = f"analysis/final_test_analysis_{final_run_name}.csv"
+                save_manual_analysis_binary(
+                    test_texts_raw,
+                    y_true_binary,
+                    y_pred_binary,
+                    id_to_label,
+                    class_to_parent,
+                    analysis_path,
+                )
+
+                logger.info(f"FINAL {final_run_name} | Test F1-Macro: {test_metrics['f1_macro']:.4f} | "
+                            f"Subset Acc: {test_metrics['subset_accuracy']:.4f} | "
+                            f"Hamming Loss: {test_metrics['hamming_loss']:.4f}")
+
+                try:
+                    mlflow.transformers.log_model(trainer.model, "model")
+                except Exception as e:
+                    logger.warning(f"Failed to log model artifact: {e}")
+
+    logger.info("\n=== Transformer pipeline complete ===")
+    logger.info("Phase 1: 80 runs with val metrics → analysis/val_analysis_*.csv")
+    logger.info("Phase 2: 10 final runs with test metrics → analysis/final_test_analysis_*.csv")
 
 
 if __name__ == "__main__":
