@@ -4,6 +4,7 @@ import sys
 import gzip
 import urllib.request
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,7 +13,6 @@ import mlflow
 from loguru import logger
 
 from src.data_loader import prepare_data
-from src.utils.preprocessing import preprocess_for_deep_learning
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
 from src.deep_learning.models import BiLSTM, TextCNN, FastTextDataset, BertDataset
 
@@ -154,55 +154,9 @@ def evaluate(model, loader, criterion, device, bert_mode=False):
     return total_loss / len(loader), all_labels, all_preds
 
 
-def train_single_run(
-    *,
-    embedding_type,
-    model_type,
-    param_value,
-    target_level,  # 'basic' or 'fine'
-    train_texts, val_texts, test_texts,
-    y_train_fine, y_val_fine, y_test_fine,
-    y_train_basic, y_val_basic, y_test_basic,
-    FINE_TO_ID, ID_TO_FINE,
-    BASIC_TO_ID, ID_TO_BASIC,
-    FINE_TO_BASIC_TAXONOMY,
-    num_epochs=30,
-    batch_size=32,
-    lr=1e-3,
-    patience=3,
-    max_len=128,
-):
-    is_basic = (target_level == 'basic')
-    num_classes = len(BASIC_TO_ID) if is_basic else len(FINE_TO_ID)
-    id_to_class = ID_TO_BASIC if is_basic else ID_TO_FINE
-    class_to_parent = {} if is_basic else FINE_TO_BASIC_TAXONOMY
-    y_train = y_train_basic if is_basic else y_train_fine
-    y_val = y_val_basic if is_basic else y_val_fine
-    y_test = y_test_basic if is_basic else y_test_fine
-
-    run_tag = f"{model_type}_{embedding_type}_{target_level}_{'hid' if model_type == 'bilstm' else 'filt'}{param_value}"
-    logger.info(f"Starting run: {run_tag}")
-
-    if embedding_type == 'fasttext':
-        word_to_id, emb_matrix, embed_dim = build_fasttext_embedding(train_texts)
-        train_ds = FastTextDataset(train_texts, y_train, word_to_id, max_len=max_len)
-        val_ds = FastTextDataset(val_texts, y_val, word_to_id, max_len=max_len)
-        test_ds = FastTextDataset(test_texts, y_test, word_to_id, max_len=max_len) if len(test_texts) > 0 else None
-        bert_mode = False
-    elif embedding_type == 'indobert':
-        tokenizer, bert_model, embed_dim = build_indobert_embedder(freeze=True)
-        train_ds = BertDataset(train_texts, y_train, tokenizer, max_len=max_len)
-        val_ds = BertDataset(val_texts, y_val, tokenizer, max_len=max_len)
-        test_ds = BertDataset(test_texts, y_test, tokenizer, max_len=max_len) if len(test_texts) > 0 else None
-        bert_mode = True
-    else:
-        raise ValueError(f"Unknown embedding_type: {embedding_type}")
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size)
-    test_loader = DataLoader(test_ds, batch_size=batch_size) if test_ds else None
-
-    # Build classifier head
+def _build_model(embedding_type, model_type, param_value, num_classes,
+                 word_to_id=None, emb_matrix=None, embed_dim=None,
+                 bert_model=None, tokenizer=None):
     if model_type == 'bilstm':
         classifier = BiLSTM(embed_dim, hidden_dim=param_value, num_classes=num_classes)
     elif model_type == 'cnn':
@@ -210,7 +164,6 @@ def train_single_run(
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
 
-    # Wrap with embedding if needed
     if embedding_type == 'fasttext':
         embedding_layer = nn.Embedding.from_pretrained(emb_matrix, freeze=True, padding_idx=0)
         embedding_layer.to(DEVICE)
@@ -225,6 +178,7 @@ def train_single_run(
                 return self.classifier(self.embedding(x))
 
         model = FastTextModel()
+        bert_mode = False
     else:
         class IndoBERTModel(nn.Module):
             def __init__(self):
@@ -237,12 +191,75 @@ def train_single_run(
                 return self.classifier(bert_outputs.last_hidden_state)
 
         model = IndoBERTModel()
+        bert_mode = True
 
     model.to(DEVICE)
+    return model, bert_mode
+
+
+def _build_datasets(embedding_type, texts, labels, word_to_id=None,
+                    tokenizer=None, max_len=128):
+    if embedding_type == 'fasttext':
+        return FastTextDataset(texts, labels, word_to_id, max_len=max_len)
+    else:
+        return BertDataset(texts, labels, tokenizer, max_len=max_len)
+
+
+def train_and_evaluate_val(
+    *,
+    embedding_type,
+    model_type,
+    param_value,
+    target_level,
+    train_texts, val_texts,
+    y_train, y_val,
+    y_val_basic, y_train_basic,
+    BASIC_TO_ID, ID_TO_BASIC,
+    FINE_TO_ID, ID_TO_FINE,
+    FINE_TO_BASIC_TAXONOMY,
+    num_epochs=30,
+    batch_size=32,
+    lr=1e-3,
+    patience=3,
+    max_len=128,
+    val_texts_raw=None,
+):
+    is_basic = (target_level == 'basic')
+    num_classes = len(BASIC_TO_ID) if is_basic else len(FINE_TO_ID)
+    id_to_class = ID_TO_BASIC if is_basic else ID_TO_FINE
+    class_to_parent = {} if is_basic else FINE_TO_BASIC_TAXONOMY
+
+    run_tag = f"{model_type}_{embedding_type}_{target_level}_{'hid' if model_type == 'bilstm' else 'filt'}{param_value}"
+    logger.info(f"Phase 1 run: {run_tag}")
+
+    if embedding_type == 'fasttext':
+        word_to_id, emb_matrix, embed_dim = build_fasttext_embedding(train_texts)
+        train_ds = FastTextDataset(train_texts, y_train, word_to_id, max_len=max_len)
+        val_ds = FastTextDataset(val_texts, y_val, word_to_id, max_len=max_len)
+        bert_mode = False
+    else:
+        tokenizer, bert_model, embed_dim = build_indobert_embedder(freeze=True)
+        train_ds = BertDataset(train_texts, y_train, tokenizer, max_len=max_len)
+        val_ds = BertDataset(val_texts, y_val, tokenizer, max_len=max_len)
+        bert_mode = True
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size)
+
+    model, bert_mode = _build_model(
+        embedding_type, model_type, param_value, num_classes,
+        word_to_id=word_to_id if embedding_type == 'fasttext' else None,
+        emb_matrix=emb_matrix if embedding_type == 'fasttext' else None,
+        embed_dim=embed_dim,
+        bert_model=bert_model if embedding_type == 'indobert' else None,
+        tokenizer=tokenizer if embedding_type == 'indobert' else None,
+    )
+
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     best_val_f1 = -1.0
+    best_epoch = 0
     best_state = None
     no_improve_epochs = 0
 
@@ -283,9 +300,10 @@ def train_single_run(
 
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
+            best_epoch = epoch
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             no_improve_epochs = 0
-            logger.info(f"  New best val_f1_macro = {best_val_f1:.4f}")
+            logger.info(f"  New best val_f1_macro = {best_val_f1:.4f} at epoch {best_epoch}")
         else:
             no_improve_epochs += 1
             if no_improve_epochs >= patience:
@@ -294,9 +312,7 @@ def train_single_run(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    logger.info(f"Training complete. Best val_f1_macro = {best_val_f1:.4f}")
 
-    # Final validation evaluation with best model
     _, y_val_true, y_val_pred = evaluate(model, val_loader, criterion, DEVICE, bert_mode=bert_mode)
     final_val_metrics = compute_all_metrics_binary(y_val_true, y_val_pred, id_to_class, class_to_parent)
     for k, v in final_val_metrics.items():
@@ -307,59 +323,141 @@ def train_single_run(
         for k, v in final_val_basic.items():
             mlflow.log_metric(f"val_basic_{k}", v)
 
-    # Test evaluation
-    if test_loader is not None and len(test_texts) > 0:
-        _, y_test_true, y_test_pred = evaluate(model, test_loader, criterion, DEVICE, bert_mode=bert_mode)
-        test_metrics = compute_all_metrics_binary(y_test_true, y_test_pred, id_to_class, class_to_parent)
-        for k, v in test_metrics.items():
-            mlflow.log_metric(f"test_{k}", v)
-
-        if not is_basic:
-            y_test_pred_basic = fine_to_basic_predictions(y_test_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
-            test_basic = compute_all_metrics_binary(y_test_basic, y_test_pred_basic, ID_TO_BASIC, {})
-            for k, v in test_basic.items():
-                mlflow.log_metric(f"test_basic_{k}", v)
-
-        analysis_dir = "analysis"
-        os.makedirs(analysis_dir, exist_ok=True)
-        analysis_path = os.path.join(analysis_dir, f"manual_analysis_{run_tag}.csv")
-        if is_basic:
-            save_manual_analysis_binary(
-                test_texts, y_test_true, y_test_pred,
-                ID_TO_BASIC, {},
-                analysis_path,
-                y_true_extra=y_test_fine,
-                y_pred_extra=None,
-                id_to_extra=ID_TO_FINE,
-            )
-        else:
-            save_manual_analysis_binary(
-                test_texts, y_test_true, y_test_pred,
-                ID_TO_FINE, FINE_TO_BASIC_TAXONOMY, analysis_path,
-            )
-        logger.info(f"Manual analysis exported to: {analysis_path}")
-
-        logger.info(
-            f"Test results: f1_m={test_metrics['f1_macro']:.4f} | "
-            f"sub_acc={test_metrics['subset_accuracy']:.4f} | "
-            f"ham_loss={test_metrics['hamming_loss']:.4f}"
+    os.makedirs("analysis", exist_ok=True)
+    val_analysis_path = f"analysis/val_analysis_{run_tag}.csv"
+    if is_basic:
+        save_manual_analysis_binary(
+            val_texts_raw, y_val_true, y_val_pred,
+            ID_TO_BASIC, {}, val_analysis_path,
+            y_true_extra=y_val_basic if not is_basic else None,
+            y_pred_extra=None,
+            id_to_extra=ID_TO_FINE if not is_basic else None,
+        )
+    else:
+        save_manual_analysis_binary(
+            val_texts_raw, y_val_true, y_val_pred,
+            ID_TO_FINE, FINE_TO_BASIC_TAXONOMY, val_analysis_path,
         )
 
-        try:
-            mlflow.pytorch.log_model(model, "model")
-            logger.info("Model artifact logged to MLflow.")
-        except Exception as e:
-            logger.warning(f"Failed to log model artifact: {e}")
+    try:
+        mlflow.pytorch.log_model(model, "model")
+        logger.info("Model artifact logged to MLflow.")
+    except Exception as e:
+        logger.warning(f"Failed to log model artifact: {e}")
 
-    logger.info(f"Run {run_tag} finished.\n")
-    return best_val_f1
+    logger.info(f"Phase 1 run {run_tag} finished. Best val_f1_macro={best_val_f1:.4f} at epoch {best_epoch}")
+
+    return {
+        'run_tag': run_tag,
+        'embedding_type': embedding_type,
+        'model_type': model_type,
+        'target_level': target_level,
+        'val_f1_macro': best_val_f1,
+        'best_epoch': best_epoch,
+    }
+
+
+def retrain_and_test(
+    *,
+    embedding_type,
+    model_type,
+    param_value,
+    target_level,
+    best_epoch,
+    train_val_texts, test_texts,
+    y_train_val, y_test,
+    y_test_basic,
+    y_train_val_basic,
+    BASIC_TO_ID, ID_TO_BASIC,
+    FINE_TO_ID, ID_TO_FINE,
+    FINE_TO_BASIC_TAXONOMY,
+    test_texts_raw,
+    batch_size=32,
+    lr=1e-3,
+    max_len=128,
+):
+    is_basic = (target_level == 'basic')
+    num_classes = len(BASIC_TO_ID) if is_basic else len(FINE_TO_ID)
+    id_to_class = ID_TO_BASIC if is_basic else ID_TO_FINE
+    class_to_parent = {} if is_basic else FINE_TO_BASIC_TAXONOMY
+
+    run_tag = f"FINAL_{model_type}_{embedding_type}_{target_level}"
+    logger.info(f"Phase 2: {run_tag} — retraining on train+val for {best_epoch} epochs, then test ONCE")
+
+    if embedding_type == 'fasttext':
+        word_to_id, emb_matrix, embed_dim = build_fasttext_embedding(train_val_texts)
+        train_val_ds = FastTextDataset(train_val_texts, y_train_val, word_to_id, max_len=max_len)
+        test_ds = FastTextDataset(test_texts, y_test, word_to_id, max_len=max_len)
+        bert_mode = False
+    else:
+        tokenizer, bert_model, embed_dim = build_indobert_embedder(freeze=True)
+        train_val_ds = BertDataset(train_val_texts, y_train_val, tokenizer, max_len=max_len)
+        test_ds = BertDataset(test_texts, y_test, tokenizer, max_len=max_len)
+        bert_mode = True
+
+    train_val_loader = DataLoader(train_val_ds, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_ds, batch_size=batch_size)
+
+    model, bert_mode = _build_model(
+        embedding_type, model_type, param_value, num_classes,
+        word_to_id=word_to_id if embedding_type == 'fasttext' else None,
+        emb_matrix=emb_matrix if embedding_type == 'fasttext' else None,
+        embed_dim=embed_dim,
+        bert_model=bert_model if embedding_type == 'indobert' else None,
+        tokenizer=tokenizer if embedding_type == 'indobert' else None,
+    )
+
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    for epoch in range(1, best_epoch + 1):
+        train_loss = train_epoch(model, train_val_loader, optimizer, criterion, DEVICE, bert_mode=bert_mode)
+        logger.info(f"  Phase 2 Epoch {epoch}/{best_epoch} | train_loss={train_loss:.4f}")
+
+    _, y_test_true, y_test_pred = evaluate(model, test_loader, criterion, DEVICE, bert_mode=bert_mode)
+    test_metrics = compute_all_metrics_binary(y_test_true, y_test_pred, id_to_class, class_to_parent)
+
+    for k, v in test_metrics.items():
+        mlflow.log_metric(f"test_{k}", v)
+
+    if not is_basic:
+        y_test_pred_basic = fine_to_basic_predictions(y_test_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
+        test_basic = compute_all_metrics_binary(y_test_basic, y_test_pred_basic, ID_TO_BASIC, {})
+        for k, v in test_basic.items():
+            mlflow.log_metric(f"test_basic_{k}", v)
+
+    os.makedirs("analysis", exist_ok=True)
+    analysis_path = f"analysis/final_test_analysis_{run_tag}.csv"
+    if is_basic:
+        save_manual_analysis_binary(
+            test_texts_raw, y_test_true, y_test_pred,
+            ID_TO_BASIC, {}, analysis_path,
+            y_true_extra=y_test_basic if not is_basic else None,
+            y_pred_extra=None,
+            id_to_extra=ID_TO_FINE if not is_basic else None,
+        )
+    else:
+        save_manual_analysis_binary(
+            test_texts_raw, y_test_true, y_test_pred,
+            ID_TO_FINE, FINE_TO_BASIC_TAXONOMY, analysis_path,
+        )
+
+    logger.info(f"FINAL {run_tag} | Test F1-Macro: {test_metrics['f1_macro']:.4f} | "
+                f"Subset Acc: {test_metrics['subset_accuracy']:.4f} | "
+                f"Hamming Loss: {test_metrics['hamming_loss']:.4f}")
+
+    try:
+        mlflow.pytorch.log_model(model, "model")
+    except Exception as e:
+        logger.warning(f"Failed to log model artifact: {e}")
+
+    return test_metrics
 
 
 def train_dl(data_path):
     logger.info("=== Deep Learning Multi-Label Emotion Classification ===")
     logger.info(f"Device: {DEVICE}")
 
-    # Load and preprocess data
     (
         train_df, val_df, test_df,
         y_train_basic, y_val_basic, y_test_basic,
@@ -373,6 +471,8 @@ def train_dl(data_path):
     train_texts = train_df['preprocessed_text'].tolist()
     val_texts = val_df['preprocessed_text'].tolist()
     test_texts = test_df['preprocessed_text'].tolist()
+    val_texts_raw = val_df['text'].tolist()
+    test_texts_raw = test_df['text'].tolist()
     logger.info(f"Train: {len(train_texts)}, Val: {len(val_texts)}, Test: {len(test_texts)}")
 
     y_train_fine = y_train_fine.astype(np.float32)
@@ -382,38 +482,38 @@ def train_dl(data_path):
     y_val_basic = y_val_basic.astype(np.float32)
     y_test_basic = y_test_basic.astype(np.float32)
 
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 1: EXPERIMENTATION — val metrics only, NO test
+    # ═══════════════════════════════════════════════════════════════
     mlflow.set_experiment("Deep_Learning_MultiLabel")
+    phase1_results = []
+    logger.info("PHASE 1: Experimentation runs (val metrics only)...")
 
-    # Best-practice hyperparameters from literature:
-    #   BiLSTM: hidden_dim=128 (Graves & Schmidhuber, 2005)
-    #   CNN: num_filters=100, filter_sizes=[3,4,5] (Kim, 2014)
-    #   Baihaqi et al. (2023) for Indonesian emotion CNN
     embedding_configs = ['fasttext', 'indobert']
+    target_levels = ['basic', 'fine']
 
     common_kwargs = dict(
         train_texts=train_texts,
         val_texts=val_texts,
-        test_texts=test_texts,
-        y_train_fine=y_train_fine,
-        y_val_fine=y_val_fine,
-        y_test_fine=y_test_fine,
-        y_train_basic=y_train_basic,
         y_val_basic=y_val_basic,
-        y_test_basic=y_test_basic,
-        FINE_TO_ID=FINE_TO_ID,
-        ID_TO_FINE=ID_TO_FINE,
+        y_train_basic=y_train_basic,
         BASIC_TO_ID=BASIC_TO_ID,
         ID_TO_BASIC=ID_TO_BASIC,
+        FINE_TO_ID=FINE_TO_ID,
+        ID_TO_FINE=ID_TO_FINE,
         FINE_TO_BASIC_TAXONOMY=FINE_TO_BASIC_TAXONOMY,
+        val_texts_raw=val_texts_raw,
     )
-
-    target_levels = ['basic', 'fine']
 
     for emb_type in embedding_configs:
         for target in target_levels:
-            # BiLSTM with fixed hidden_dim=128
+            is_basic = (target == 'basic')
+            y_train = y_train_basic if is_basic else y_train_fine
+            y_val = y_val_basic if is_basic else y_val_fine
+
             run_tag = f"bilstm_{emb_type}_{target}"
             with mlflow.start_run(run_name=run_tag):
+                mlflow.set_tag("phase", "experimentation")
                 mlflow.log_params({
                     "model_type": "bilstm",
                     "embedding_type": emb_type,
@@ -424,21 +524,24 @@ def train_dl(data_path):
                     "learning_rate": 1e-3,
                 })
                 try:
-                    train_single_run(
+                    result = train_and_evaluate_val(
                         embedding_type=emb_type,
                         model_type='bilstm',
                         param_value=128,
                         target_level=target,
+                        y_train=y_train,
+                        y_val=y_val,
                         **common_kwargs,
                     )
+                    phase1_results.append(result)
                 except Exception as e:
                     logger.error(f"Run {run_tag} FAILED: {e}")
                     mlflow.log_param("status", "failed")
                     mlflow.log_param("error", str(e))
 
-            # CNN with fixed num_filters=100 (Kim, 2014)
             run_tag = f"cnn_{emb_type}_{target}"
             with mlflow.start_run(run_name=run_tag):
+                mlflow.set_tag("phase", "experimentation")
                 mlflow.log_params({
                     "model_type": "cnn",
                     "embedding_type": emb_type,
@@ -449,19 +552,87 @@ def train_dl(data_path):
                     "learning_rate": 1e-3,
                 })
                 try:
-                    train_single_run(
+                    result = train_and_evaluate_val(
                         embedding_type=emb_type,
                         model_type='cnn',
                         param_value=100,
                         target_level=target,
+                        y_train=y_train,
+                        y_val=y_val,
                         **common_kwargs,
                     )
+                    phase1_results.append(result)
                 except Exception as e:
                     logger.error(f"Run {run_tag} FAILED: {e}")
                     mlflow.log_param("status", "failed")
                     mlflow.log_param("error", str(e))
 
+    logger.info(f"\nPHASE 1 complete. {len(phase1_results)} runs logged (val metrics only).")
+
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 2: FINAL REPORT — retrain best on train+val, test ONCE
+    # ═══════════════════════════════════════════════════════════════
+    mlflow.set_experiment("Deep_Learning_Final_Test")
+    logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per target)...")
+
+    train_val_df = pd.concat([train_df, val_df], ignore_index=True)
+    train_val_texts = train_val_df['preprocessed_text'].tolist()
+    test_texts = test_df['preprocessed_text'].tolist()
+    test_texts_raw = test_df['text'].tolist()
+
+    y_train_val_basic = np.concatenate([y_train_basic, y_val_basic], axis=0)
+    y_train_val_fine = np.concatenate([y_train_fine, y_val_fine], axis=0)
+
+    for target in target_levels:
+        target_results = [r for r in phase1_results if r['target_level'] == target]
+        if not target_results:
+            logger.warning(f"No Phase 1 results for target={target}, skipping Phase 2.")
+            continue
+        best = max(target_results, key=lambda x: x['val_f1_macro'])
+        is_basic = (target == 'basic')
+        y_train_val = y_train_val_basic if is_basic else y_train_val_fine
+        y_test = y_test_basic if is_basic else y_test_fine
+
+        run_tag = f"FINAL_{best['model_type']}_{best['embedding_type']}_{target}"
+        with mlflow.start_run(run_name=run_tag):
+            mlflow.set_tag("phase", "final_test")
+            mlflow.log_params({
+                "model_type": best['model_type'],
+                "embedding_type": best['embedding_type'],
+                "target_level": target,
+                "best_epoch": best['best_epoch'],
+                "selected_by_val_f1_macro": best['val_f1_macro'],
+                "hidden_dim" if best['model_type'] == 'bilstm' else "num_filters": 128 if best['model_type'] == 'bilstm' else 100,
+            })
+
+            try:
+                retrain_and_test(
+                    embedding_type=best['embedding_type'],
+                    model_type=best['model_type'],
+                    param_value=128 if best['model_type'] == 'bilstm' else 100,
+                    target_level=target,
+                    best_epoch=best['best_epoch'],
+                    train_val_texts=train_val_texts,
+                    test_texts=test_texts,
+                    y_train_val=y_train_val,
+                    y_test=y_test,
+                    y_test_basic=y_test_basic,
+                    y_train_val_basic=y_train_val_basic,
+                    BASIC_TO_ID=BASIC_TO_ID,
+                    ID_TO_BASIC=ID_TO_BASIC,
+                    FINE_TO_ID=FINE_TO_ID,
+                    ID_TO_FINE=ID_TO_FINE,
+                    FINE_TO_BASIC_TAXONOMY=FINE_TO_BASIC_TAXONOMY,
+                    test_texts_raw=test_texts_raw,
+                )
+            except Exception as e:
+                logger.error(f"Phase 2 run {run_tag} FAILED: {e}")
+                mlflow.log_param("status", "failed")
+                mlflow.log_param("error", str(e))
+
     logger.info("=== Deep Learning pipeline complete ===")
+    logger.info("Phase 1: 8 runs with val metrics → analysis/val_analysis_*.csv")
+    logger.info("Phase 2: 2 final runs with test metrics → analysis/final_test_analysis_*.csv")
 
 
 if __name__ == '__main__':
