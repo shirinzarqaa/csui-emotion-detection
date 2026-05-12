@@ -2,6 +2,7 @@ import json
 import pandas as pd
 import numpy as np
 from typing import Tuple, Dict, List
+from src.utils.preprocessing import preprocess_for_traditional
 
 FINE_TO_BASIC_TAXONOMY = {
     'acceptance': 'joy',
@@ -107,6 +108,10 @@ def get_splits(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFra
 
 def prepare_data(filepath: str, use_fine_grained: bool = True):
     df = load_data(filepath)
+    
+    # PREPROCESSING SEBELUM SPLIT (flow user)
+    df['preprocessed_text'] = df['text'].apply(preprocess_for_traditional)
+    
     train_df, val_df, test_df = get_splits(df)
 
     # Parse multi-labels for each row

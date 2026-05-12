@@ -23,11 +23,7 @@ def train_transformers(data_path: str):
         FINE_TO_BASIC_TAXONOMY,
     ) = prepare_data(data_path)
 
-    logger.info("Preprocessing texts...")
-    train_df["preprocessed_text"] = train_df["text"].apply(preprocess_for_transformers)
-    val_df["preprocessed_text"] = val_df["text"].apply(preprocess_for_transformers)
-    if not test_df.empty:
-        test_df["preprocessed_text"] = test_df["text"].apply(preprocess_for_transformers)
+    logger.info("Using preprocessed text from data_loader...")
 
     models_to_train = {
         "IndoBERT": "indobenchmark/indobert-base-p1",
@@ -55,7 +51,7 @@ def train_transformers(data_path: str):
             continue
 
         def tokenize_function(examples):
-            return tokenizer(examples["preprocessed_text"], padding=False, truncation=True, max_length=128)
+            return tokenizer(examples["text"], padding=False, truncation=True, max_length=128)
 
         for target in target_levels:
             is_basic = (target == 'basic')

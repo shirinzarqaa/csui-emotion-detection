@@ -12,7 +12,7 @@ from sklearn.svm import SVC
 from sklearn.multioutput import MultiOutputClassifier
 
 from src.data_loader import prepare_data
-from src.utils.preprocessing import preprocess_for_traditional, preprocess_batch
+from src.utils.preprocessing import preprocess_batch
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
 
 
@@ -79,10 +79,10 @@ def train_traditional(data_path: str):
         FINE_TO_BASIC_TAXONOMY,
     ) = prepare_data(data_path)
 
-    logger.info("Preprocessing text...")
-    train_texts = preprocess_batch(train_df['text'].tolist(), mode='traditional')
-    val_texts = preprocess_batch(val_df['text'].tolist(), mode='traditional')
-    test_texts = preprocess_batch(test_df['text'].tolist(), mode='traditional')
+    logger.info("Using preprocessed text from data_loader...")
+    train_texts = train_df['preprocessed_text'].tolist()
+    val_texts = val_df['preprocessed_text'].tolist()
+    test_texts = test_df['preprocessed_text'].tolist()
     test_texts_raw = test_df['text'].tolist()
 
     feature_configs = [

@@ -369,10 +369,10 @@ def train_dl(data_path):
         FINE_TO_BASIC_TAXONOMY,
     ) = prepare_data(data_path)
 
-    logger.info("Preprocessing texts for deep learning ...")
-    train_texts = [preprocess_for_deep_learning(t) for t in train_df['text'].values]
-    val_texts = [preprocess_for_deep_learning(t) for t in val_df['text'].values]
-    test_texts = [preprocess_for_deep_learning(t) for t in test_df['text'].values]
+    logger.info("Using preprocessed text from data_loader...")
+    train_texts = train_df['preprocessed_text'].tolist()
+    val_texts = val_df['preprocessed_text'].tolist()
+    test_texts = test_df['preprocessed_text'].tolist()
     logger.info(f"Train: {len(train_texts)}, Val: {len(val_texts)}, Test: {len(test_texts)}")
 
     y_train_fine = y_train_fine.astype(np.float32)
