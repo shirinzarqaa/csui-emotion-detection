@@ -11,17 +11,18 @@ csui-emotion-detection/
 ├── data/
 │   └── new_all.json          # Primary dataset (32,598 samples)
 ├── src/
-│   ├── data_loader.py        # Multi-label parsing: new_label_basic (7 labels) → new_label_fine_grained (45 labels)
+│   ├── data_loader.py        # Multi-label parsing: new_label_basic (6 labels) → new_label_fine_grained (44 labels)
 │   ├── utils/
 │   │   ├── metrics.py        # Evaluation: f1-macro/micro/weighted, hamming loss, subset accuracy, per-label F1
-│   │   └── preprocessing.py  # 3 preprocessing modes: traditional, DL, transformers
+│   │   ├── preprocessing.py  # 3 preprocessing modes: traditional, DL, transformers
+│   │   └── inference_analysis.py  # Deep per-sample inference analysis (Phase 2 only)
 │   ├── traditional/
 │   │   └── traditional_pipeline.py  # 54 runs: BR/LP × Unigram/Bigram/Trigram × BoW/TF-IDF × LR/NB/SVM
 │   ├── deep_learning/
 │   │   ├── dl_pipeline.py    # 8 runs: FastText/IndoBERT × BiLSTM/CNN × basic/fine target levels
 │   │   └── models.py         # BiLSTM, TextCNN, FastTextDataset, BertDataset
 │   └── transformers/
-│       └── transformer_pipeline.py  # 40 HPO runs: 5 models × 4 LR × 2 batch sizes
+│       └── transformer_pipeline.py  # 80 HPO runs: 5 models × 2 targets × 4 LR × 2 batch sizes
 ├── analysis/                 # CSV error analysis files after each run
 ├── run_pipeline.py           # Orchestrator: --run traditional|dl|transformers|all
 ├── requirements.txt
@@ -33,7 +34,7 @@ csui-emotion-detection/
 
 ## Label Taxonomy (Hierarchical)
 
-| Basic (7) | Fine-grained (45) |
+| Basic (6) | Fine-grained (44) |
 |---|---|
 | **anger** | aggressiveness, annoyance, disapproval, disgust, rage |
 | **fear** | anticipation, distrust, fear, fears-confirmed, nervousness, restlessness, submission, worry |
@@ -41,9 +42,8 @@ csui-emotion-detection/
 | **love** | attraction, caring, longing, love, lust, nonsexual desire |
 | **sadness** | broken-heart, compassion, embarrassment, feeling moved, grief, hopelessness, pensiveness, pity, remorse, suffering |
 | **surprise** | confusion, realization, surprise |
-| **no emotion** | no emotion |
 
-Taxonomy built from single-label rows (27,794 of 32,598 data) — each fine-grained label maps to exactly one basic parent.
+> **"no emotion" excluded**: The training split has 0 samples labeled "no emotion" (it only appears in val: 4, test: 6). A model cannot learn a class it has never seen, so "no emotion" is excluded from both basic (6 labels) and fine-grained (44 labels) label sets. This is documented in `src/data_loader.py:EXCLUDED_BASIC_LABELS`.
 
 ---
 
@@ -114,7 +114,49 @@ Each pipeline computes **5 core metrics** + per-label F1:
 | **F1-Micro** | Global F1 (aggregates all labels) |
 | **F1-Weighted** | Per-label F1 weighted by label frequency |
 
-Per-label F1 scores are also reported for all 45 fine-grained labels. All metrics are logged to MLflow.
+Per-label F1 scores are also reported for all 44 fine-grained labels. All metrics are logged to MLflow.
+
+---
+
+## Experiment Methodology: Phase 1 + Phase 2
+
+To prevent **test set leakage**, all pipelines follow a strict two-phase protocol:
+
+> **Rule: Test set is touched ONCE, at the very end. Val set is used during development.**
+
+### Phase 1: Experimentation (many runs)
+
+| Step | Dataset | Purpose |
+|---|---|---|
+| Fit model | Train | Learn parameters |
+| Predict + metrics | **Val** | Compare models, select best config |
+| Log to MLflow | Val metrics | Track experiments |
+| Error analysis CSV | Val | `analysis/val_analysis_*.csv` |
+| Test? | **SKIP** | Never during development |
+
+### Phase 2: Final Report (once, at the end)
+
+| Step | Dataset | Purpose |
+|---|---|---|
+| Retrain best model | **Train + Val** | Maximize training data |
+| Predict + metrics | **Test** | Unbiased final score (once) |
+| Error analysis CSV | Test | `analysis/final_test_analysis_*.csv` |
+| Log to MLflow | Test metrics | Archive final result |
+
+**Why?** If you evaluate on test every run, you subconsciously tune to test performance. Val = compass during development. Test = final exam taken once.
+
+### MLflow Organization
+
+| Experiment | Phase | Contents |
+|---|---|---|
+| `Traditional_ML_MultiLabel` | Phase 1 | 54 runs with val metrics |
+| `Traditional_ML_Final_Test` | Phase 2 | 3 final runs with test metrics |
+| `Deep_Learning_MultiLabel` | Phase 1 | 8 runs with val metrics |
+| `Deep_Learning_Final_Test` | Phase 2 | 2 final runs with test metrics |
+| `Transformer_MultiLabel` | Phase 1 | 80 runs with val metrics |
+| `Transformer_Final_Test` | Phase 2 | 10 final runs with test metrics |
+
+Each run is tagged with `phase: experimentation` or `phase: final_test`.
 
 ---
 
@@ -124,9 +166,9 @@ Per-label F1 scores are also reported for all 45 fine-grained labels. All metric
 
 | Scenario | Target | Strategy |
 |---|---|---|
-| **BR_Basic** | 7 basic labels | Binary Relevance: 7 independent classifiers |
-| **LP_Basic** | 7 basic labels | Label Powerset: multi-label combo → single multi-class |
-| **BR_Fine** | 45 fine-grained labels | Binary Relevance: 45 independent classifiers |
+| **BR_Basic** | 6 basic labels | Binary Relevance: 6 independent classifiers |
+| **LP_Basic** | 6 basic labels | Label Powerset: multi-label combo → single multi-class |
+| **BR_Fine** | 44 fine-grained labels | Binary Relevance: 44 independent classifiers |
 
 ### Feature Extraction & Classifiers (6 combinations × 3 models = 18 runs per scenario)
 
@@ -145,7 +187,7 @@ Total: 3 scenarios × 6 features × 3 models = **54 runs**. Models logged to MLf
 
 ## Pipeline: Deep Learning (8 runs)
 
-Each model is trained **independently on both target levels** — basic labels (7 classes) and fine-grained labels (45 classes).
+Each model is trained **independently on both target levels** — basic labels (6 classes) and fine-grained labels (44 classes).
 
 ### Embedding
 
@@ -167,8 +209,8 @@ Two embedding approaches using best-practice fixed hyperparameters:
 
 | Level | Labels | Output |
 |---|---|---|
-| **basic** | 7 | Direct 7-label prediction |
-| **fine** | 45 | Direct 45-label prediction; basic derived via taxonomy mapping |
+| **basic** | 6 | Direct 6-label prediction |
+| **fine** | 44 | Direct 44-label prediction; basic derived via taxonomy mapping |
 
 Total: 2 embeddings × 2 models × 2 target levels = **8 runs**. Training: BCEWithLogitsLoss, Adam(lr=1e-3), early stopping (patience=3). Models logged to MLflow via `mlflow.pytorch.log_model()`.
 
@@ -176,7 +218,7 @@ Total: 2 embeddings × 2 models × 2 target levels = **8 runs**. Training: BCEWi
 
 ## Pipeline: Transformers (80 HPO runs)
 
-Each model is fine-tuned **independently on both target levels** — basic labels (7 classes) and fine-grained labels (45 classes).
+Each model is fine-tuned **independently on both target levels** — basic labels (6 classes) and fine-grained labels (44 classes).
 
 ### HuggingFace Models
 
@@ -258,7 +300,34 @@ mlflow ui
 
 ### Manual Error Analysis
 
-After each run, a CSV is automatically generated in `analysis/` with columns: `Text`, `True_Basic`, `True_Fine`, `Pred_Basic`, `Pred_Fine`, `Status`.
+**Phase 1 (val)**: After each run, a CSV is generated in `analysis/val_analysis_*.csv` with columns: `Text`, `True_Basic`, `True_Fine`, `Pred_Basic`, `Pred_Fine`, `Status`.
+
+**Phase 2 (test)**: After final evaluation, a CSV is generated in `analysis/final_test_analysis_*.csv` with the same columns.
+
+### Deep Inference Analysis (Phase 2 only)
+
+`src/utils/inference_analysis.py` provides per-sample deep analysis with probability scores:
+
+```python
+from src.utils.inference_analysis import run_inference_and_analysis
+
+df = run_inference_and_analysis(
+    y_pred=y_pred_binary,       # (N, C) binary predictions
+    y_prob=probs_matrix,        # (N, C) sigmoid probabilities
+    y_test=y_test_binary,       # (N, C) ground truth
+    texts=test_texts_raw,       # list of raw text
+    id_to_label=ID_TO_BASIC,    # label mapping
+    pipeline_name="bilstm_fasttext_basic",
+)
+```
+
+**Output files:**
+
+| File | Contents |
+|---|---|
+| `deep_analysis_*.csv` | Per-sample: text, true/pred labels, confidence, n_overpredict, n_underpredict, status, ambiguous labels, prob per label |
+| `hard_samples_*.csv` | Subset: complete_mismatch + low confidence (<0.55) + ambiguous labels (prob 0.3-0.7) |
+| `deep_analysis_summary_*.txt` | Aggregate: status distribution, avg confidence, per-label avg probability |
 
 ---
 
