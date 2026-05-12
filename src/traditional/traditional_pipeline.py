@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import numpy as np
+import pandas as pd
 from loguru import logger
 import mlflow
 
@@ -12,7 +13,6 @@ from sklearn.svm import SVC
 from sklearn.multioutput import MultiOutputClassifier
 
 from src.data_loader import prepare_data
-from src.utils.preprocessing import preprocess_batch
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
 
 
@@ -68,6 +68,31 @@ def get_seen_labels(y):
     return np.where(y.sum(axis=0) > 0)[0]
 
 
+def _make_vectorizer(feat_conf):
+    if feat_conf['vectorizer'] == 'count':
+        return CountVectorizer(
+            ngram_range=feat_conf['ngram_range'],
+            max_features=feat_conf['max_features'],
+        )
+    else:
+        return TfidfVectorizer(
+            ngram_range=feat_conf['ngram_range'],
+            max_features=feat_conf['max_features'],
+        )
+
+
+def _make_model(model_type, model_params):
+    cls = {"LR": LogisticRegression, "NB": MultinomialNB, "SVM": SVC}[model_type]
+    return cls(**model_params)
+
+
+MODEL_PARAMS = {
+    "LR": {"max_iter": 2000, "random_state": 42},
+    "NB": {"alpha": 1.0},
+    "SVM": {"kernel": "rbf", "random_state": 42},
+}
+
+
 def train_traditional(data_path: str):
     logger.info("Loading data...")
     (
@@ -83,6 +108,7 @@ def train_traditional(data_path: str):
     train_texts = train_df['preprocessed_text'].tolist()
     val_texts = val_df['preprocessed_text'].tolist()
     test_texts = test_df['preprocessed_text'].tolist()
+    val_texts_raw = val_df['text'].tolist()
     test_texts_raw = test_df['text'].tolist()
 
     feature_configs = [
@@ -94,17 +120,16 @@ def train_traditional(data_path: str):
         {"name": "Trigram_TFIDF", "ngram_range": (1, 3), "vectorizer": "tfidf", "max_features": 15000},
     ]
 
-    models_def = {
-        "LR": LogisticRegression(max_iter=2000, random_state=42),
-        "NB": MultinomialNB(alpha=1.0),
-        "SVM": SVC(kernel='rbf', random_state=42),
-    }
-
-    mlflow.set_experiment("Traditional_ML_MultiLabel")
-
     scenarios = ["BR_Basic", "LP_Basic", "BR_Fine"]
-    total_runs = len(scenarios) * len(feature_configs) * len(models_def)
-    logger.info(f"Starting {total_runs} total runs across {len(scenarios)} scenarios...")
+
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 1: EXPERIMENTATION — val metrics only, NO test
+    # ═══════════════════════════════════════════════════════════════
+    mlflow.set_experiment("Traditional_ML_MultiLabel")
+    phase1_results = []
+
+    total_runs = len(scenarios) * len(feature_configs) * len(MODEL_PARAMS)
+    logger.info(f"PHASE 1: {total_runs} experimentation runs (val metrics only)...")
 
     for scenario in scenarios:
         logger.info(f"\n=== SCENARIO: {scenario} ===")
@@ -112,7 +137,6 @@ def train_traditional(data_path: str):
         if scenario == "BR_Basic":
             y_train = y_train_basic
             y_val = y_val_basic
-            y_test = y_test_basic
             id_to_class = ID_TO_BASIC
             is_powerset = False
             is_fine = False
@@ -120,7 +144,6 @@ def train_traditional(data_path: str):
         elif scenario == "LP_Basic":
             y_train = y_train_basic
             y_val = y_val_basic
-            y_test = y_test_basic
             id_to_class = ID_TO_BASIC
             is_powerset = True
             is_fine = False
@@ -132,7 +155,6 @@ def train_traditional(data_path: str):
         else:  # BR_Fine
             y_train = y_train_fine
             y_val = y_val_fine
-            y_test = y_test_fine
             id_to_class = ID_TO_FINE
             is_powerset = False
             is_fine = True
@@ -146,119 +168,211 @@ def train_traditional(data_path: str):
         for feat_conf in feature_configs:
             logger.info(f"--- Feature config: {feat_conf['name']} ---")
 
-            if feat_conf['vectorizer'] == 'count':
-                vectorizer = CountVectorizer(
-                    ngram_range=feat_conf['ngram_range'],
-                    max_features=feat_conf['max_features'],
-                )
-            else:
-                vectorizer = TfidfVectorizer(
-                    ngram_range=feat_conf['ngram_range'],
-                    max_features=feat_conf['max_features'],
-                )
-
+            vectorizer = _make_vectorizer(feat_conf)
             X_train = vectorizer.fit_transform(train_texts)
             X_val = vectorizer.transform(val_texts)
-            X_test = vectorizer.transform(test_texts)
 
-            for model_abbr, base_model in models_def.items():
-                run_tag = f"{scenario}_{feat_conf['name']}_{model_abbr}"
+            for model_type in MODEL_PARAMS:
+                run_tag = f"{scenario}_{feat_conf['name']}_{model_type}"
                 logger.info(f"Training {run_tag}...")
 
                 with mlflow.start_run(run_name=run_tag):
+                    mlflow.set_tag("phase", "experimentation")
                     mlflow.log_param("scenario", scenario)
                     mlflow.log_param("feature_extraction", feat_conf['name'])
                     mlflow.log_param("ngram_range", str(feat_conf['ngram_range']))
                     mlflow.log_param("max_features", feat_conf['max_features'])
-                    mlflow.log_param("model_type", model_abbr)
+                    mlflow.log_param("model_type", model_type)
 
+                    base_model = _make_model(model_type, MODEL_PARAMS[model_type])
                     for param_name, param_val in base_model.get_params().items():
                         mlflow.log_param(param_name, param_val)
 
                     if is_powerset:
-                        model = base_model
+                        model = _make_model(model_type, MODEL_PARAMS[model_type])
                         model.fit(X_train, y_train_lp)
                         preds_val_lp = model.predict(X_val)
-                        preds_test_lp = model.predict(X_test)
                         preds_val_bin = lp_converter.inverse_transform(preds_val_lp)
-                        preds_test_bin = lp_converter.inverse_transform(preds_test_lp)
                     else:
-                        model = MultiOutputClassifier(base_model)
+                        model = MultiOutputClassifier(_make_model(model_type, MODEL_PARAMS[model_type]))
                         if n_seen < n_total:
                             y_train_filtered = y_train[:, seen_labels]
                             model.fit(X_train, y_train_filtered)
                             preds_val_filtered = model.predict(X_val)
-                            preds_test_filtered = model.predict(X_test)
                             preds_val_bin = np.zeros((len(y_val), n_total), dtype=np.int32)
-                            preds_test_bin = np.zeros((len(y_test), n_total), dtype=np.int32)
                             preds_val_bin[:, seen_labels] = preds_val_filtered
-                            preds_test_bin[:, seen_labels] = preds_test_filtered
                         else:
                             model.fit(X_train, y_train)
                             preds_val_bin = model.predict(X_val)
-                            preds_test_bin = model.predict(X_test)
 
-                    metrics_val = compute_all_metrics_binary(
-                        y_val,
-                        preds_val_bin,
-                        id_to_class,
-                        taxonomy,
-                    )
+                    metrics_val = compute_all_metrics_binary(y_val, preds_val_bin, id_to_class, taxonomy)
                     for k, v in metrics_val.items():
                         mlflow.log_metric(f"val_{k}", v)
 
-                    metrics_test = compute_all_metrics_binary(
-                        y_test,
-                        preds_test_bin,
-                        id_to_class,
-                        taxonomy,
-                    )
-                    for k, v in metrics_test.items():
-                        mlflow.log_metric(f"test_{k}", v)
-
                     os.makedirs("analysis", exist_ok=True)
-
-                    analysis_path = f"analysis/manual_analysis_{run_tag}.csv"
+                    val_analysis_path = f"analysis/val_analysis_{run_tag}.csv"
                     if is_fine:
                         save_manual_analysis_binary(
-                            test_texts_raw,
-                            y_test_fine, preds_test_bin,
+                            val_texts_raw, y_val_fine, preds_val_bin,
                             ID_TO_FINE, FINE_TO_BASIC_TAXONOMY,
-                            analysis_path,
+                            val_analysis_path,
                         )
                     else:
-                        preds_basic_bin = preds_test_bin
                         save_manual_analysis_binary(
-                            test_texts_raw,
-                            y_test_basic, preds_basic_bin,
-                            ID_TO_BASIC, {},
-                            analysis_path,
-                            y_true_extra=y_test_fine,
+                            val_texts_raw, y_val_basic, preds_val_bin,
+                            ID_TO_BASIC, {}, val_analysis_path,
+                            y_true_extra=y_val_fine,
                             y_pred_extra=None,
                             id_to_extra=ID_TO_FINE,
                         )
-                    logger.info(f"Manual analysis exported to: {analysis_path}")
 
-                    logger.info(
-                        f"{run_tag} | Val F1-Macro: {metrics_val['f1_macro']:.4f} | "
-                        f"Test F1-Macro: {metrics_test['f1_macro']:.4f}"
-                    )
+                    logger.info(f"{run_tag} | Val F1-Macro: {metrics_val['f1_macro']:.4f}")
 
                     try:
                         if is_powerset:
                             mlflow.sklearn.log_model(model, "model")
-                        elif n_seen < n_total:
-                            wrapper_cls = base_model.__class__
-                            wrapper = MultiOutputClassifier(wrapper_cls(**base_model.get_params()))
-                            if hasattr(model, 'estimators_'):
-                                wrapper.estimators_ = model.estimators_
-                            mlflow.sklearn.log_model(wrapper, "model")
                         else:
                             mlflow.sklearn.log_model(model, "model")
                     except Exception as e:
                         logger.warning(f"Failed to log model artifact: {e}")
 
+                    phase1_results.append({
+                        'scenario': scenario,
+                        'feature_name': feat_conf['name'],
+                        'ngram_range': feat_conf['ngram_range'],
+                        'max_features': feat_conf['max_features'],
+                        'vectorizer_type': feat_conf['vectorizer'],
+                        'model_type': model_type,
+                        'val_f1_macro': metrics_val['f1_macro'],
+                        'val_f1_micro': metrics_val['f1_micro'],
+                        'val_subset_accuracy': metrics_val['subset_accuracy'],
+                        'val_hamming_loss': metrics_val['hamming_loss'],
+                    })
+
+    logger.info(f"\nPHASE 1 complete. {len(phase1_results)} runs logged (val metrics only).")
+
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 2: FINAL REPORT — retrain best on train+val, test ONCE
+    # ═══════════════════════════════════════════════════════════════
+    mlflow.set_experiment("Traditional_ML_Final_Test")
+    logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per scenario)...")
+
+    train_val_df = pd.concat([train_df, val_df], ignore_index=True)
+    train_val_texts = train_val_df['preprocessed_text'].tolist()
+    y_train_val_basic = np.concatenate([y_train_basic, y_val_basic], axis=0)
+    y_train_val_fine = np.concatenate([y_train_fine, y_val_fine], axis=0)
+
+    for scenario in scenarios:
+        scenario_results = [r for r in phase1_results if r['scenario'] == scenario]
+        best = max(scenario_results, key=lambda x: x['val_f1_macro'])
+
+        logger.info(f"Best {scenario}: {best['feature_name']} + {best['model_type']} "
+                     f"(val F1-Macro: {best['val_f1_macro']:.4f})")
+
+        if scenario == "BR_Basic":
+            y_train_val = y_train_val_basic
+            y_test = y_test_basic
+            id_to_class = ID_TO_BASIC
+            is_powerset = False
+            is_fine = False
+            taxonomy = {}
+        elif scenario == "LP_Basic":
+            y_train_val = y_train_val_basic
+            y_test = y_test_basic
+            id_to_class = ID_TO_BASIC
+            is_powerset = True
+            is_fine = False
+            taxonomy = {}
+            lp_converter_final = LabelPowersetConverter(ID_TO_BASIC)
+            lp_converter_final.fit(y_train_val_basic)
+            y_train_val_lp = lp_converter_final.transform(y_train_val_basic)
+        else:  # BR_Fine
+            y_train_val = y_train_val_fine
+            y_test = y_test_fine
+            id_to_class = ID_TO_FINE
+            is_powerset = False
+            is_fine = True
+            taxonomy = FINE_TO_BASIC_TAXONOMY
+
+        feat_conf_best = {
+            'name': best['feature_name'],
+            'ngram_range': best['ngram_range'],
+            'max_features': best['max_features'],
+            'vectorizer': best['vectorizer_type'],
+        }
+        vectorizer = _make_vectorizer(feat_conf_best)
+        X_train_val = vectorizer.fit_transform(train_val_texts)
+        X_test = vectorizer.transform(test_texts)
+
+        seen_labels_tv = get_seen_labels(y_train_val)
+        n_seen_tv = len(seen_labels_tv)
+        n_total_tv = y_train_val.shape[1]
+
+        run_tag = f"FINAL_{scenario}_{best['feature_name']}_{best['model_type']}"
+        with mlflow.start_run(run_name=run_tag):
+            mlflow.set_tag("phase", "final_test")
+            mlflow.log_params({
+                "scenario": scenario,
+                "feature_extraction": best['feature_name'],
+                "ngram_range": str(best['ngram_range']),
+                "max_features": best['max_features'],
+                "model_type": best['model_type'],
+                "selected_by_val_f1_macro": best['val_f1_macro'],
+            })
+
+            base_model = _make_model(best['model_type'], MODEL_PARAMS[best['model_type']])
+            for param_name, param_val in base_model.get_params().items():
+                mlflow.log_param(param_name, param_val)
+
+            if is_powerset:
+                model = _make_model(best['model_type'], MODEL_PARAMS[best['model_type']])
+                model.fit(X_train_val, y_train_val_lp)
+                preds_test_lp = model.predict(X_test)
+                preds_test_bin = lp_converter_final.inverse_transform(preds_test_lp)
+            else:
+                model = MultiOutputClassifier(_make_model(best['model_type'], MODEL_PARAMS[best['model_type']]))
+                if n_seen_tv < n_total_tv:
+                    y_train_val_filtered = y_train_val[:, seen_labels_tv]
+                    model.fit(X_train_val, y_train_val_filtered)
+                    preds_test_filtered = model.predict(X_test)
+                    preds_test_bin = np.zeros((len(y_test), n_total_tv), dtype=np.int32)
+                    preds_test_bin[:, seen_labels_tv] = preds_test_filtered
+                else:
+                    model.fit(X_train_val, y_train_val)
+                    preds_test_bin = model.predict(X_test)
+
+            metrics_test = compute_all_metrics_binary(y_test, preds_test_bin, id_to_class, taxonomy)
+            for k, v in metrics_test.items():
+                mlflow.log_metric(f"test_{k}", v)
+
+            os.makedirs("analysis", exist_ok=True)
+            analysis_path = f"analysis/final_test_analysis_{scenario}.csv"
+            if is_fine:
+                save_manual_analysis_binary(
+                    test_texts_raw, y_test_fine, preds_test_bin,
+                    ID_TO_FINE, FINE_TO_BASIC_TAXONOMY, analysis_path,
+                )
+            else:
+                save_manual_analysis_binary(
+                    test_texts_raw, y_test_basic, preds_test_bin,
+                    ID_TO_BASIC, {}, analysis_path,
+                    y_true_extra=y_test_fine,
+                    y_pred_extra=None,
+                    id_to_extra=ID_TO_FINE,
+                )
+
+            logger.info(f"FINAL {scenario} | Test F1-Macro: {metrics_test['f1_macro']:.4f} | "
+                        f"Subset Acc: {metrics_test['subset_accuracy']:.4f} | "
+                        f"Hamming Loss: {metrics_test['hamming_loss']:.4f}")
+
+            try:
+                mlflow.sklearn.log_model(model, "model")
+            except Exception as e:
+                logger.warning(f"Failed to log model artifact: {e}")
+
     logger.info("\n=== Pipeline complete ===")
+    logger.info("Phase 1: 54 runs with val metrics → analysis/val_analysis_*.csv")
+    logger.info("Phase 2: 3 final runs with test metrics → analysis/final_test_analysis_*.csv")
 
 
 if __name__ == "__main__":
