@@ -34,7 +34,6 @@ FINE_TO_BASIC_TAXONOMY = {
     'love': 'love',
     'lust': 'love',
     'nervousness': 'fear',
-    'no emotion': 'no emotion',
     'nonsexual desire': 'love',
     'optimism': 'joy',
     'pensiveness': 'sadness',
@@ -52,8 +51,10 @@ FINE_TO_BASIC_TAXONOMY = {
     'worry': 'fear',
 }
 
-BASIC_LABELS = sorted(set(FINE_TO_BASIC_TAXONOMY.values()))
-FINE_LABELS = sorted(FINE_TO_BASIC_TAXONOMY.keys())
+EXCLUDED_BASIC_LABELS = {'no emotion'}
+
+BASIC_LABELS = sorted(set(FINE_TO_BASIC_TAXONOMY.values()) - EXCLUDED_BASIC_LABELS)
+FINE_LABELS = sorted(set(FINE_TO_BASIC_TAXONOMY.keys()) - EXCLUDED_BASIC_LABELS)
 
 BASIC_TO_ID = {label: idx for idx, label in enumerate(BASIC_LABELS)}
 ID_TO_BASIC = {idx: label for label, idx in BASIC_TO_ID.items()}
