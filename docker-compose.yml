@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   mlflow-server:
-    image: ghcr.io/mlflow/mlflow:v2.9.2
+    image: ghcr.io/mlflow/mlflow:v3.10.0
     container_name: mlflow-server
     ports:
       - "8002:8002"
@@ -14,45 +14,3 @@ services:
       --default-artifact-root /mlflow_data/artifacts
     volumes:
       - ./mlflow_data:/mlflow_data
-
-  traditional:
-    build: .
-    container_name: pipeline-traditional
-    environment:
-      - MLFLOW_TRACKING_URI=http://mlflow-server:8002
-    volumes:
-      - ./data:/app/data
-      - ./src:/app/src
-      - ./run_pipeline.py:/app/run_pipeline.py
-    working_dir: /app
-    command: ["python", "run_pipeline.py", "--run", "traditional"]
-    depends_on:
-      - mlflow-server
-
-  deep-learning:
-    build: .
-    container_name: pipeline-dl
-    environment:
-      - MLFLOW_TRACKING_URI=http://mlflow-server:8002
-    volumes:
-      - ./data:/app/data
-      - ./src:/app/src
-      - ./run_pipeline.py:/app/run_pipeline.py
-    working_dir: /app
-    command: ["python", "run_pipeline.py", "--run", "dl"]
-    depends_on:
-      - mlflow-server
-
-  transformers:
-    build: .
-    container_name: pipeline-transformers
-    environment:
-      - MLFLOW_TRACKING_URI=http://mlflow-server:8002
-    volumes:
-      - ./data:/app/data
-      - ./src:/app/src
-      - ./run_pipeline.py:/app/run_pipeline.py
-    working_dir: /app
-    command: ["python", "run_pipeline.py", "--run", "transformers"]
-    depends_on:
-      - mlflow-server
