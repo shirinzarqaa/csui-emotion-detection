@@ -256,10 +256,7 @@ def train_and_evaluate_val(
         tokenizer=tokenizer if embedding_type == 'indobert' else None,
     )
 
-    pos_count = y_train.sum(axis=0)
-    neg_count = len(y_train) - pos_count
-    pos_weight = torch.tensor(neg_count / (pos_count + 1e-6), dtype=torch.float).to(DEVICE)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     best_val_f1 = -1.0
@@ -411,10 +408,7 @@ def retrain_and_test(
         tokenizer=tokenizer if embedding_type == 'indobert' else None,
     )
 
-    pos_count_tv = y_train_val.sum(axis=0)
-    neg_count_tv = len(y_train_val) - pos_count_tv
-    pos_weight_tv = torch.tensor(neg_count_tv / (pos_count_tv + 1e-6), dtype=torch.float).to(DEVICE)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tv)
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     for epoch in range(1, best_epoch + 1):
