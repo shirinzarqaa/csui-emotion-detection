@@ -121,7 +121,8 @@ def train_transformers(data_path: str):
                         save_strategy="epoch",
                         load_best_model_at_end=True,
                         metric_for_best_model="eval_f1_macro",
-                        report_to="mlflow",
+                        logging_strategy="epoch",
+                        report_to="none",
                         run_name=hpo_run_name,
                     )
 
@@ -281,7 +282,8 @@ def train_transformers(data_path: str):
                 weight_decay=0.01,
                 eval_strategy="no",
                 save_strategy="no",
-                report_to="mlflow",
+                logging_strategy="epoch",
+                report_to="none",
                 run_name=final_run_name,
             )
 
