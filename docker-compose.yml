@@ -12,5 +12,6 @@ services:
       --port 8002
       --backend-store-uri sqlite:////mlflow_data/mlflow.db
       --default-artifact-root /mlflow_data/artifacts
+      --serve-artifacts
     volumes:
       - ./mlflow_data:/mlflow_data
