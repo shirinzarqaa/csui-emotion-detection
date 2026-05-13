@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import json
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -14,6 +15,7 @@ from sklearn.multioutput import MultiOutputClassifier
 
 from src.data_loader import prepare_data
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
+from src.utils.checkpoint import CheckpointManager
 
 
 class LabelPowersetConverter:
@@ -103,6 +105,8 @@ MODEL_PARAMS = {
 
 def train_traditional(data_path: str):
     logger.info("Loading data...")
+    ckpt = CheckpointManager("checkpoints/traditional_checkpoint.json")
+
     (
         train_df, val_df, test_df,
         y_train_basic, y_val_basic, y_test_basic,
@@ -134,7 +138,7 @@ def train_traditional(data_path: str):
     # PHASE 1: EXPERIMENTATION — val metrics only, NO test
     # ═══════════════════════════════════════════════════════════════
     mlflow.set_experiment("Traditional_ML_MultiLabel")
-    phase1_results = []
+    phase1_results = ckpt.get_phase1_results()
 
     total_runs = len(scenarios) * len(feature_configs) * len(MODEL_PARAMS)
     logger.info(f"PHASE 1: {total_runs} experimentation runs (val metrics only)...")
@@ -182,6 +186,11 @@ def train_traditional(data_path: str):
 
             for model_type in MODEL_PARAMS:
                 run_tag = f"{scenario}_{feat_conf['name']}_{model_type}"
+
+                if ckpt.is_completed(run_tag):
+                    logger.info(f"Skipping {run_tag} (already completed)")
+                    continue
+
                 logger.info(f"Training {run_tag}...")
 
                 with mlflow.start_run(run_name=run_tag):
@@ -256,12 +265,33 @@ def train_traditional(data_path: str):
                         'val_subset_accuracy': metrics_val['subset_accuracy'],
                         'val_hamming_loss': metrics_val['hamming_loss'],
                     })
+                    ckpt.add_phase1_result({
+                        'scenario': scenario,
+                        'feature_name': feat_conf['name'],
+                        'ngram_range': list(feat_conf['ngram_range']),
+                        'max_features': feat_conf['max_features'],
+                        'vectorizer_type': feat_conf['vectorizer'],
+                        'model_type': model_type,
+                        'val_f1_macro': float(metrics_val['f1_macro']),
+                        'val_f1_micro': float(metrics_val['f1_micro']),
+                        'val_subset_accuracy': float(metrics_val['subset_accuracy']),
+                        'val_hamming_loss': float(metrics_val['hamming_loss']),
+                    })
+            ckpt.mark_completed(run_tag)
+
+    ckpt.mark_phase_complete(2)
+    logger.info("\n=== Pipeline complete ===")
 
     logger.info(f"\nPHASE 1 complete. {len(phase1_results)} runs logged (val metrics only).")
+    ckpt.mark_phase_complete(1)
 
     # ═══════════════════════════════════════════════════════════════
     # PHASE 2: FINAL REPORT — retrain best on train+val, test ONCE
     # ═══════════════════════════════════════════════════════════════
+    phase1_results = ckpt.get_phase1_results()
+    if not phase1_results:
+        logger.error("No Phase 1 results found. Cannot proceed to Phase 2.")
+        return
     mlflow.set_experiment("Traditional_ML_Final_Test")
     logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per scenario)...")
 
@@ -304,7 +334,7 @@ def train_traditional(data_path: str):
 
         feat_conf_best = {
             'name': best['feature_name'],
-            'ngram_range': best['ngram_range'],
+            'ngram_range': tuple(best['ngram_range']) if isinstance(best['ngram_range'], list) else best['ngram_range'],
             'max_features': best['max_features'],
             'vectorizer': best['vectorizer_type'],
         }
@@ -317,6 +347,11 @@ def train_traditional(data_path: str):
         n_total_tv = y_train_val.shape[1]
 
         run_tag = f"FINAL_{scenario}_{best['feature_name']}_{best['model_type']}"
+
+        if ckpt.is_completed(run_tag):
+            logger.info(f"Skipping {run_tag} (already completed)")
+            continue
+
         with mlflow.start_run(run_name=run_tag):
             mlflow.set_tag("phase", "final_test")
             mlflow.log_params({
@@ -378,7 +413,7 @@ def train_traditional(data_path: str):
             except Exception as e:
                 logger.warning(f"Failed to log model artifact: {e}")
 
-    logger.info("\n=== Pipeline complete ===")
+            ckpt.mark_completed(run_tag)
     logger.info("Phase 1: 54 runs with val metrics → analysis/val_analysis_*.csv")
     logger.info("Phase 2: 3 final runs with test metrics → analysis/final_test_analysis_*.csv")
 

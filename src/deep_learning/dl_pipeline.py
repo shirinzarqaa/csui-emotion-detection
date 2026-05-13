@@ -15,6 +15,7 @@ from loguru import logger
 from src.data_loader import prepare_data
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
 from src.deep_learning.models import BiLSTM, TextCNN, FastTextDataset, BertDataset
+from src.utils.checkpoint import CheckpointManager
 
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '.fasttext_cache')
@@ -457,6 +458,7 @@ def retrain_and_test(
 def train_dl(data_path):
     logger.info("=== Deep Learning Multi-Label Emotion Classification ===")
     logger.info(f"Device: {DEVICE}")
+    ckpt = CheckpointManager("checkpoints/dl_checkpoint.json")
 
     (
         train_df, val_df, test_df,
@@ -486,7 +488,7 @@ def train_dl(data_path):
     # PHASE 1: EXPERIMENTATION — val metrics only, NO test
     # ═══════════════════════════════════════════════════════════════
     mlflow.set_experiment("Deep_Learning_MultiLabel")
-    phase1_results = []
+    phase1_results = ckpt.get_phase1_results()
     logger.info("PHASE 1: Experimentation runs (val metrics only)...")
 
     embedding_configs = ['fasttext', 'indobert']
@@ -512,6 +514,11 @@ def train_dl(data_path):
             y_val = y_val_basic if is_basic else y_val_fine
 
             run_tag = f"bilstm_{emb_type}_{target}"
+
+            if ckpt.is_completed(run_tag):
+                logger.info(f"Skipping {run_tag} (already completed)")
+                continue
+
             with mlflow.start_run(run_name=run_tag):
                 mlflow.set_tag("phase", "experimentation")
                 mlflow.log_params({
@@ -534,12 +541,19 @@ def train_dl(data_path):
                         **common_kwargs,
                     )
                     phase1_results.append(result)
+                    ckpt.add_phase1_result(result)
+                    ckpt.mark_completed(run_tag)
                 except Exception as e:
                     logger.error(f"Run {run_tag} FAILED: {e}")
                     mlflow.log_param("status", "failed")
                     mlflow.log_param("error", str(e))
 
             run_tag = f"cnn_{emb_type}_{target}"
+
+            if ckpt.is_completed(run_tag):
+                logger.info(f"Skipping {run_tag} (already completed)")
+                continue
+
             with mlflow.start_run(run_name=run_tag):
                 mlflow.set_tag("phase", "experimentation")
                 mlflow.log_params({
@@ -562,16 +576,23 @@ def train_dl(data_path):
                         **common_kwargs,
                     )
                     phase1_results.append(result)
+                    ckpt.add_phase1_result(result)
+                    ckpt.mark_completed(run_tag)
                 except Exception as e:
                     logger.error(f"Run {run_tag} FAILED: {e}")
                     mlflow.log_param("status", "failed")
                     mlflow.log_param("error", str(e))
 
     logger.info(f"\nPHASE 1 complete. {len(phase1_results)} runs logged (val metrics only).")
+    ckpt.mark_phase_complete(1)
 
     # ═══════════════════════════════════════════════════════════════
     # PHASE 2: FINAL REPORT — retrain best on train+val, test ONCE
     # ═══════════════════════════════════════════════════════════════
+    phase1_results = ckpt.get_phase1_results()
+    if not phase1_results:
+        logger.error("No Phase 1 results found. Cannot proceed to Phase 2.")
+        return
     mlflow.set_experiment("Deep_Learning_Final_Test")
     logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per target)...")
 
@@ -594,6 +615,11 @@ def train_dl(data_path):
         y_test = y_test_basic if is_basic else y_test_fine
 
         run_tag = f"FINAL_{best['model_type']}_{best['embedding_type']}_{target}"
+
+        if ckpt.is_completed(run_tag):
+            logger.info(f"Skipping {run_tag} (already completed)")
+            continue
+
         with mlflow.start_run(run_name=run_tag):
             mlflow.set_tag("phase", "final_test")
             mlflow.log_params({
@@ -625,11 +651,13 @@ def train_dl(data_path):
                     FINE_TO_BASIC_TAXONOMY=FINE_TO_BASIC_TAXONOMY,
                     test_texts_raw=test_texts_raw,
                 )
+                ckpt.mark_completed(run_tag)
             except Exception as e:
                 logger.error(f"Phase 2 run {run_tag} FAILED: {e}")
                 mlflow.log_param("status", "failed")
                 mlflow.log_param("error", str(e))
 
+    ckpt.mark_phase_complete(2)
     logger.info("=== Deep Learning pipeline complete ===")
     logger.info("Phase 1: 8 runs with val metrics → analysis/val_analysis_*.csv")
     logger.info("Phase 2: 2 final runs with test metrics → analysis/final_test_analysis_*.csv")

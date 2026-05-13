@@ -10,10 +10,13 @@ from loguru import logger
 
 from src.data_loader import prepare_data
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
+from src.utils.checkpoint import CheckpointManager
 
 
 def train_transformers(data_path: str):
     logger.info("Loading data...")
+    ckpt = CheckpointManager("checkpoints/transformers_checkpoint.json")
+
     (
         train_df, val_df, test_df,
         y_train_basic, y_val_basic, y_test_basic,
@@ -40,7 +43,7 @@ def train_transformers(data_path: str):
     # PHASE 1: EXPERIMENTATION — val metrics only, NO test
     # ═══════════════════════════════════════════════════════════════
     mlflow.set_experiment("Transformer_MultiLabel")
-    phase1_results = []
+    phase1_results = ckpt.get_phase1_results()
     logger.info("PHASE 1: Experimentation runs (val metrics only)...")
 
     for model_name, model_id in models_to_train.items():
@@ -88,6 +91,11 @@ def train_transformers(data_path: str):
             for lr in learning_rates:
                 for bs in batch_sizes:
                     hpo_run_name = f"{model_name}_{target}_lr{lr}_bs{bs}"
+
+                    if ckpt.is_completed(hpo_run_name):
+                        logger.info(f"    Skipping {hpo_run_name} (already completed)")
+                        continue
+
                     logger.info(f"    Phase 1: {hpo_run_name}")
 
                     try:
@@ -168,16 +176,30 @@ def train_transformers(data_path: str):
                             'batch_size': bs,
                             'val_f1_macro': val_f1_macro,
                         })
+                        ckpt.add_phase1_result({
+                            'model_name': model_name,
+                            'model_id': model_id,
+                            'target_level': target,
+                            'learning_rate': lr,
+                            'batch_size': bs,
+                            'val_f1_macro': float(val_f1_macro),
+                        })
+                        ckpt.mark_completed(hpo_run_name)
 
                         logger.info(f"    {hpo_run_name} | Val F1-Macro: {val_f1_macro:.4f}")
 
         logger.info(f"  All Phase 1 HPO runs for {model_name} completed.")
 
     logger.info(f"\nPHASE 1 complete. {len(phase1_results)} runs logged (val metrics only).")
+    ckpt.mark_phase_complete(1)
 
     # ═══════════════════════════════════════════════════════════════
     # PHASE 2: FINAL REPORT — retrain best on train+val, test ONCE
     # ═══════════════════════════════════════════════════════════════
+    phase1_results = ckpt.get_phase1_results()
+    if not phase1_results:
+        logger.error("No Phase 1 results found. Cannot proceed to Phase 2.")
+        return
     mlflow.set_experiment("Transformer_Final_Test")
     logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per model+target)...")
 
@@ -245,6 +267,11 @@ def train_transformers(data_path: str):
                 continue
 
             final_run_name = f"FINAL_{model_name}_{target}_lr{best['learning_rate']}_bs{best['batch_size']}"
+
+            if ckpt.is_completed(final_run_name):
+                logger.info(f"Skipping {final_run_name} (already completed)")
+                continue
+
             training_args = TrainingArguments(
                 output_dir=f"./results/{final_run_name}",
                 learning_rate=best['learning_rate'],
@@ -310,6 +337,9 @@ def train_transformers(data_path: str):
                 except Exception as e:
                     logger.warning(f"Failed to log model artifact: {e}")
 
+                ckpt.mark_completed(final_run_name)
+
+    ckpt.mark_phase_complete(2)
     logger.info("\n=== Transformer pipeline complete ===")
     logger.info("Phase 1: 80 runs with val metrics → analysis/val_analysis_*.csv")
     logger.info("Phase 2: 10 final runs with test metrics → analysis/final_test_analysis_*.csv")
