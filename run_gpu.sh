@@ -11,6 +11,8 @@
 
 DATA_PATH="${1:-./data/new_all.json}"
 
+VENV_PATH="${2:-./venv}"
+
 mkdir -p checkpoints logs mlflow_data
 
 echo "Starting MLflow server (Docker)..."
@@ -31,15 +33,15 @@ done
 tmux new-session -d -s train -n traditional
 
 # Window 1: Traditional ML (CPU only, joblib parallel)
-tmux send-keys -t train:traditional "export MLFLOW_TRACKING_URI=http://localhost:8002 && python run_pipeline.py --data_path $DATA_PATH --run traditional 2>&1 | tee logs/traditional.log" Enter
+tmux send-keys -t train:traditional "source $VENV_PATH/bin/activate && export MLFLOW_TRACKING_URI=http://localhost:8002 && python run_pipeline.py --data_path $DATA_PATH --run traditional 2>&1 | tee logs/traditional.log" Enter
 
 # Window 2: DL then Transformers (GPU sequential)
 tmux new-window -t train -n gpu
-tmux send-keys -t train:gpu "export MLFLOW_TRACKING_URI=http://localhost:8002 && echo '=== Deep Learning (8 runs) ===' && python run_pipeline.py --data_path $DATA_PATH --run dl 2>&1 | tee logs/dl.log && echo '=== Transformers (80 runs) ===' && python run_pipeline.py --data_path $DATA_PATH --run transformers 2>&1 | tee logs/transformers.log && echo '=== All GPU training complete ==='" Enter
+tmux send-keys -t train:gpu "source $VENV_PATH/bin/activate && export MLFLOW_TRACKING_URI=http://localhost:8002 && echo '=== Deep Learning (8 runs) ===' && python run_pipeline.py --data_path $DATA_PATH --run dl 2>&1 | tee logs/dl.log && echo '=== Transformers (80 runs) ===' && python run_pipeline.py --data_path $DATA_PATH --run transformers 2>&1 | tee logs/transformers.log && echo '=== All GPU training complete ==='" Enter
 
-# Window 3: MLflow monitor (optional, nvidia-smi + htop)
+# Window 3: Monitor
 tmux new-window -t train -n monitor
-tmux send-keys -t train:monitor "watch -n 10 'echo === GPU === && nvidia-smi && echo && echo === Checkpoints === && for f in checkpoints/*.json; do echo \$f: \$(python -c \"import json; d=json.load(open(\\\"\$f\\\")); print(len(d.get(\\\"completed_runs\\\",[])),\\\"completed\\\")\" 2>/dev/null); done'" Enter
+tmux send-keys -t train:monitor "source $VENV_PATH/bin/activate && watch -n 10 'echo === GPU === && nvidia-smi && echo && echo === Checkpoints === && for f in checkpoints/*.json; do echo \$f: \$(python -c \"import json; d=json.load(open(\\\"\$f\\\")); print(len(d.get(\\\"completed_runs\\\",[])),\\\"completed\\\")\" 2>/dev/null); done'" Enter
 
 echo ""
 echo "All launched in tmux session 'train':"
