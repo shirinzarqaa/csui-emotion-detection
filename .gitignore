@@ -209,14 +209,12 @@ __marimo__/
 # Data files (only exclude old/duplicate data)
 data/dataset.json
 data/all.json
-*.xlsx
 
 # MLflow artifacts (generated at runtime)
 mlflow.db
 mlruns/
 mlflow_data/
 results/
-analysis/
 
 # FastText cache (downloaded at runtime)
 .fasttext_cache/
@@ -226,3 +224,12 @@ checkpoints/
 
 # Training logs
 logs/
+
+# Runtime analysis (overwritten each experiment)
+analysis/
+
+# Experiment results — ALLOWED for git
+!exp_*/
+
+# Saved transformer models (too large for git)
+saved_models/

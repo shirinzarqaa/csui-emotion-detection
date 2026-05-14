@@ -11,6 +11,7 @@ from loguru import logger
 from src.data_loader import prepare_data
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
 from src.utils.checkpoint import CheckpointManager
+from src.utils.mlflow_utils import safe_set_experiment, safe_start_run, safe_end_run, safe_log_param, safe_log_params, safe_log_metric, safe_log_metrics, safe_set_tag
 
 
 def train_transformers(data_path: str):
@@ -34,15 +35,15 @@ def train_transformers(data_path: str):
         "mmBERT": "jhu-clsp/mmBERT-base",
     }
 
-    learning_rates = [2e-5, 3e-5, 4e-5, 5e-5]
-    batch_sizes = [16, 32]
+    learning_rates = [2e-5, 3e-5, 5e-5]
+    batch_sizes = [32]
     num_epochs = 3
     target_levels = ['basic', 'fine']
 
     # ═══════════════════════════════════════════════════════════════
     # PHASE 1: EXPERIMENTATION — val metrics only, NO test
     # ═══════════════════════════════════════════════════════════════
-    mlflow.set_experiment("Transformer_MultiLabel")
+    safe_set_experiment("Transformer_MultiLabel")
     phase1_results = ckpt.get_phase1_results()
     logger.info("PHASE 1: Experimentation runs (val metrics only)...")
 
@@ -135,59 +136,74 @@ def train_transformers(data_path: str):
                         compute_metrics=compute_metrics_hf,
                     )
 
-                    with mlflow.start_run(run_name=hpo_run_name):
-                        mlflow.set_tag("phase", "experimentation")
-                        mlflow.log_param("model_id", model_id)
-                        mlflow.log_param("target_level", target)
-                        mlflow.log_param("learning_rate", lr)
-                        mlflow.log_param("batch_size", bs)
-                        mlflow.log_param("num_epochs", num_epochs)
+                    active_run = safe_start_run(run_name=hpo_run_name)
+                    mlflow_active = active_run is not None
+                    if mlflow_active:
+                        safe_set_tag("phase", "experimentation")
+                        safe_log_param("model_id", model_id)
+                        safe_log_param("target_level", target)
+                        safe_log_param("learning_rate", lr)
+                        safe_log_param("batch_size", bs)
+                        safe_log_param("num_epochs", num_epochs)
 
-                        trainer.train()
+                    trainer.train()
 
-                        val_results = trainer.evaluate(tokenized_val, metric_key_prefix="val")
-                        val_f1_macro = val_results.get("val_f1_macro", -1.0)
+                    val_results = trainer.evaluate(tokenized_val, metric_key_prefix="val")
+                    val_f1_macro = val_results.get("val_f1_macro", -1.0)
 
+                    if mlflow_active:
                         for key, value in val_results.items():
                             if key.startswith("val_") and isinstance(value, (int, float)):
-                                mlflow.log_metric(key, value)
+                                safe_log_metric(key, value)
 
-                        preds_output = trainer.predict(tokenized_val)
-                        val_logits = preds_output.predictions
-                        val_probs = torch.sigmoid(torch.tensor(val_logits)).numpy()
-                        y_val_pred = (val_probs >= 0.5).astype(np.int32)
-                        y_val_true = preds_output.label_ids
+                    preds_output = trainer.predict(tokenized_val)
+                    val_logits = preds_output.predictions
+                    val_probs = torch.sigmoid(torch.tensor(val_logits)).numpy()
+                    y_val_pred = (val_probs >= 0.5).astype(np.int32)
+                    y_val_true = preds_output.label_ids
 
-                        os.makedirs("analysis", exist_ok=True)
-                        val_analysis_path = f"analysis/val_analysis_{hpo_run_name}.csv"
-                        save_manual_analysis_binary(
-                            val_df["text"].tolist(),
-                            y_val_true,
-                            y_val_pred,
-                            id_to_label,
-                            class_to_parent,
-                            val_analysis_path,
-                        )
+                    os.makedirs("analysis", exist_ok=True)
+                    val_analysis_path = f"analysis/val_analysis_{hpo_run_name}.csv"
+                    save_manual_analysis_binary(
+                        val_df["text"].tolist(),
+                        y_val_true,
+                        y_val_pred,
+                        id_to_label,
+                        class_to_parent,
+                        val_analysis_path,
+                    )
 
-                        phase1_results.append({
-                            'model_name': model_name,
-                            'model_id': model_id,
-                            'target_level': target,
-                            'learning_rate': lr,
-                            'batch_size': bs,
-                            'val_f1_macro': val_f1_macro,
-                        })
-                        ckpt.add_phase1_result({
-                            'model_name': model_name,
-                            'model_id': model_id,
-                            'target_level': target,
-                            'learning_rate': lr,
-                            'batch_size': bs,
-                            'val_f1_macro': float(val_f1_macro),
-                        })
-                        ckpt.mark_completed(hpo_run_name)
+                    phase1_results.append({
+                        'model_name': model_name,
+                        'model_id': model_id,
+                        'target_level': target,
+                        'learning_rate': lr,
+                        'batch_size': bs,
+                        'val_f1_macro': val_f1_macro,
+                    })
+                    ckpt.add_phase1_result({
+                        'model_name': model_name,
+                        'model_id': model_id,
+                        'target_level': target,
+                        'learning_rate': lr,
+                        'batch_size': bs,
+                        'val_f1_macro': float(val_f1_macro),
+                    })
+                    ckpt.mark_completed(hpo_run_name)
 
-                        logger.info(f"    {hpo_run_name} | Val F1-Macro: {val_f1_macro:.4f}")
+                    logger.info(f"    {hpo_run_name} | Val F1-Macro: {val_f1_macro:.4f}")
+
+                    save_dir = f"saved_models/{hpo_run_name}"
+                    os.makedirs(save_dir, exist_ok=True)
+                    trainer.save_model(save_dir)
+                    tokenizer.save_pretrained(save_dir)
+                    logger.info(f"    Model saved to {save_dir}/")
+
+                    if mlflow_active:
+                        safe_end_run()
+
+                    del model, trainer
+                    torch.cuda.empty_cache()
 
         logger.info(f"  All Phase 1 HPO runs for {model_name} completed.")
 
@@ -201,7 +217,7 @@ def train_transformers(data_path: str):
     if not phase1_results:
         logger.error("No Phase 1 results found. Cannot proceed to Phase 2.")
         return
-    mlflow.set_experiment("Transformer_Final_Test")
+    safe_set_experiment("Transformer_Final_Test")
     logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per model+target)...")
 
     train_val_df = pd.concat([train_df, val_df], ignore_index=True)
@@ -294,9 +310,11 @@ def train_transformers(data_path: str):
                 data_collator=data_collator,
             )
 
-            with mlflow.start_run(run_name=final_run_name):
-                mlflow.set_tag("phase", "final_test")
-                mlflow.log_params({
+            active_run = safe_start_run(run_name=final_run_name)
+            mlflow_active = active_run is not None
+            if mlflow_active:
+                safe_set_tag("phase", "final_test")
+                safe_log_params({
                     "model_id": model_id,
                     "target_level": target,
                     "learning_rate": best['learning_rate'],
@@ -305,46 +323,58 @@ def train_transformers(data_path: str):
                     "selected_by_val_f1_macro": best['val_f1_macro'],
                 })
 
-                logger.info(f"Phase 2: Fine-tuning {final_run_name} on train+val ({len(train_val_df)} samples)...")
-                trainer.train()
+            logger.info(f"Phase 2: Fine-tuning {final_run_name} on train+val ({len(train_val_df)} samples)...")
+            trainer.train()
 
-                logger.info(f"Phase 2: Predicting on test set...")
-                preds_output = trainer.predict(tokenized_test)
-                logits = preds_output.predictions
-                probs = torch.sigmoid(torch.tensor(logits)).numpy()
-                y_pred_binary = (probs >= 0.5).astype(np.int32)
-                y_true_binary = preds_output.label_ids
+            logger.info(f"Phase 2: Predicting on test set...")
+            preds_output = trainer.predict(tokenized_test)
+            logits = preds_output.predictions
+            probs = torch.sigmoid(torch.tensor(logits)).numpy()
+            y_pred_binary = (probs >= 0.5).astype(np.int32)
+            y_true_binary = preds_output.label_ids
 
-                test_metrics = compute_all_metrics_binary(y_true_binary, y_pred_binary, id_to_label, class_to_parent)
+            test_metrics = compute_all_metrics_binary(y_true_binary, y_pred_binary, id_to_label, class_to_parent)
+            if mlflow_active:
                 for k, v in test_metrics.items():
-                    mlflow.log_metric(f"test_{k}", v)
+                    safe_log_metric(f"test_{k}", v)
 
-                os.makedirs("analysis", exist_ok=True)
-                analysis_path = f"analysis/final_test_analysis_{final_run_name}.csv"
-                save_manual_analysis_binary(
-                    test_texts_raw,
-                    y_true_binary,
-                    y_pred_binary,
-                    id_to_label,
-                    class_to_parent,
-                    analysis_path,
-                )
+            os.makedirs("analysis", exist_ok=True)
+            analysis_path = f"analysis/final_test_analysis_{final_run_name}.csv"
+            save_manual_analysis_binary(
+                test_texts_raw,
+                y_true_binary,
+                y_pred_binary,
+                id_to_label,
+                class_to_parent,
+                analysis_path,
+            )
 
-                logger.info(f"FINAL {final_run_name} | Test F1-Macro: {test_metrics['f1_macro']:.4f} | "
-                            f"Subset Acc: {test_metrics['subset_accuracy']:.4f} | "
-                            f"Hamming Loss: {test_metrics['hamming_loss']:.4f}")
+            logger.info(f"FINAL {final_run_name} | Test F1-Macro: {test_metrics['f1_macro']:.4f} | "
+                        f"Subset Acc: {test_metrics['subset_accuracy']:.4f} | "
+                        f"Hamming Loss: {test_metrics['hamming_loss']:.4f}")
 
+            if mlflow_active:
                 try:
                     mlflow.transformers.log_model(trainer.model, "model")
                 except Exception as e:
                     logger.warning(f"Failed to log model artifact: {e}")
+                safe_end_run()
 
-                ckpt.mark_completed(final_run_name)
+            save_dir = f"saved_models/{final_run_name}"
+            os.makedirs(save_dir, exist_ok=True)
+            trainer.save_model(save_dir)
+            tokenizer.save_pretrained(save_dir)
+            logger.info(f"Model saved to {save_dir}/")
+
+            ckpt.mark_completed(final_run_name)
+
+            del model, trainer
+            torch.cuda.empty_cache()
 
     ckpt.mark_phase_complete(2)
     logger.info("\n=== Transformer pipeline complete ===")
-    logger.info("Phase 1: 80 runs with val metrics → analysis/val_analysis_*.csv")
-    logger.info("Phase 2: 10 final runs with test metrics → analysis/final_test_analysis_*.csv")
+    logger.info("Phase 1: 30 runs with val metrics → analysis/val_analysis_*.csv, saved_models/")
+    logger.info("Phase 2: 10 final runs with test metrics → analysis/final_test_analysis_*.csv, saved_models/")
 
 
 if __name__ == "__main__":
