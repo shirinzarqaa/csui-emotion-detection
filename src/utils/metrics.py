@@ -20,9 +20,9 @@ def compute_all_metrics_binary(y_true, y_pred, id_to_fine, fine_to_basic):
         label_name = id_to_fine.get(j, f"label_{j}")
         per_label_f1[f"f1_{label_name}"] = float(f1_score(y_true[:, j], y_pred[:, j], zero_division=0))
         p, r, _, s = precision_recall_fscore_support(y_true[:, j], y_pred[:, j], average='binary', zero_division=0)
-        per_label_precision[f"precision_{label_name}"] = float(p)
-        per_label_recall[f"recall_{label_name}"] = float(r)
-        per_label_support[f"support_{label_name}"] = int(s[1]) if hasattr(s, '__len__') else int(s)
+        per_label_precision[f"precision_{label_name}"] = float(p) if p is not None else 0.0
+        per_label_recall[f"recall_{label_name}"] = float(r) if r is not None else 0.0
+        per_label_support[f"support_{label_name}"] = int(s) if s is not None else 0
 
     _, _, f1_macro, _ = precision_recall_fscore_support(y_true, y_pred, average='macro', zero_division=0)
     _, _, f1_micro, _ = precision_recall_fscore_support(y_true, y_pred, average='micro', zero_division=0)
