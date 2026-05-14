@@ -4,29 +4,26 @@ from sklearn.metrics import accuracy_score, precision_recall_fscore_support, ham
 
 
 def compute_all_metrics_binary(y_true, y_pred, id_to_fine, fine_to_basic):
-    """
-    Full multi-label binary metrics: subset accuracy, hamming loss,
-    f1-macro/micro/weighted, and per-label F1 scores.
-    y_true, y_pred: (N, C) binary numpy arrays.
-    """
     from sklearn.metrics import f1_score
 
     N, C = y_true.shape
 
-    # Subset accuracy (exact match of all labels per sample)
     sa = float(np.mean(np.all(y_true == y_pred, axis=1)))
 
-    # Hamming loss
     hl = float(np.sum(y_true != y_pred) / (N * C))
 
-    # F1 per label
     per_label_f1 = {}
+    per_label_precision = {}
+    per_label_recall = {}
+    per_label_support = {}
     for j in range(C):
         label_name = id_to_fine.get(j, f"label_{j}")
-        f1 = f1_score(y_true[:, j], y_pred[:, j], zero_division=0)
-        per_label_f1[f"f1_{label_name}"] = float(f1)
+        per_label_f1[f"f1_{label_name}"] = float(f1_score(y_true[:, j], y_pred[:, j], zero_division=0))
+        p, r, _, s = precision_recall_fscore_support(y_true[:, j], y_pred[:, j], average='binary', zero_division=0)
+        per_label_precision[f"precision_{label_name}"] = float(p)
+        per_label_recall[f"recall_{label_name}"] = float(r)
+        per_label_support[f"support_{label_name}"] = int(s[1]) if hasattr(s, '__len__') else int(s)
 
-    # Macro / Micro / Weighted F1 (scikit-learn multi-label)
     _, _, f1_macro, _ = precision_recall_fscore_support(y_true, y_pred, average='macro', zero_division=0)
     _, _, f1_micro, _ = precision_recall_fscore_support(y_true, y_pred, average='micro', zero_division=0)
     _, _, f1_weighted, _ = precision_recall_fscore_support(y_true, y_pred, average='weighted', zero_division=0)
@@ -39,6 +36,9 @@ def compute_all_metrics_binary(y_true, y_pred, id_to_fine, fine_to_basic):
         'f1_weighted': float(f1_weighted),
     }
     result.update(per_label_f1)
+    result.update(per_label_precision)
+    result.update(per_label_recall)
+    result.update(per_label_support)
     return result
 
 
@@ -88,12 +88,22 @@ def save_manual_analysis_binary(texts, y_true, y_pred, id_to_class, class_to_par
             else:
                 status = "Complete Mismatch"
 
+        n_true = sum(1 for j in range(len(id_to_class)) if y_true[i, j] == 1)
+        n_pred = sum(1 for j in range(len(id_to_class)) if y_pred[i, j] == 1)
+        n_wrong = int(np.sum(y_true[i] != y_pred[i]))
+        n_labels = len(id_to_class)
+
         records.append({
             'Text': text,
             'True_Basic': ', '.join(true_basic) if true_basic else 'none',
             'True_Fine': ', '.join(true_fine) if true_fine else 'none',
             'Pred_Basic': ', '.join(pred_basic) if pred_basic else 'none',
             'Pred_Fine': ', '.join(pred_fine) if pred_fine else 'none',
+            'Num_True_Labels': n_true,
+            'Num_Pred_Labels': n_pred,
+            'Num_Wrong_Labels': n_wrong,
+            'Hamming_Loss_Sample': round(n_wrong / n_labels, 4),
+            'Is_Exact_Match': 1 if status == "Exact Match" else 0,
             'Status': status,
         })
 
