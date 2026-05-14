@@ -16,7 +16,10 @@ from sklearn.multioutput import MultiOutputClassifier
 
 from src.data_loader import prepare_data
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
+from src.utils.threshold_tuning import optimize_thresholds, apply_thresholds, log_thresholds
 from src.utils.checkpoint import CheckpointManager
+from src.utils.mlflow_utils import safe_set_experiment, safe_start_run, safe_end_run, safe_log_param, safe_log_params, safe_log_metric, safe_log_metrics, safe_set_tag
+from src.utils.experiment_config import get_config
 
 
 class LabelPowersetConverter:
@@ -104,6 +107,30 @@ MODEL_PARAMS = {
 }
 
 
+def _get_proba_predictions(model, X, seen_labels, n_total, is_powerset=False, lp_converter=None):
+    if is_powerset:
+        preds_lp = model.predict(X)
+        preds_bin = lp_converter.inverse_transform(preds_lp)
+        return preds_bin, None
+    else:
+        preds_filtered = model.predict(X)
+        if hasattr(model, 'predict_proba'):
+            try:
+                proba_filtered = np.array([est.predict_proba(X)[:, 1] for est in model.estimators_]).T
+            except Exception:
+                proba_filtered = None
+        else:
+            proba_filtered = None
+        preds_bin = np.zeros((X.shape[0], n_total), dtype=np.int32)
+        preds_bin[:, seen_labels] = preds_filtered
+        if proba_filtered is not None:
+            full_probs = np.zeros((X.shape[0], n_total), dtype=np.float64)
+            full_probs[:, seen_labels] = proba_filtered
+        else:
+            full_probs = None
+        return preds_bin, full_probs
+
+
 def _run_single_phase1(
     run_tag, scenario, feat_conf, model_type,
     train_texts, val_texts, val_texts_raw,
@@ -112,91 +139,126 @@ def _run_single_phase1(
     y_train_lp, lp_converter,
     seen_labels, n_seen, n_total,
     ID_TO_BASIC, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY,
+    use_threshold_tuning=False,
+    mlflow_experiment_p1="Traditional_ML_MultiLabel",
+    analysis_dir="analysis",
 ):
     result = None
     try:
-        mlflow.set_experiment("Traditional_ML_MultiLabel")
+        safe_set_experiment(mlflow_experiment_p1)
         vectorizer = _make_vectorizer(feat_conf)
         X_train = vectorizer.fit_transform(train_texts)
         X_val = vectorizer.transform(val_texts)
 
-        with mlflow.start_run(run_name=run_tag):
-            mlflow.set_tag("phase", "experimentation")
-            mlflow.log_param("scenario", scenario)
-            mlflow.log_param("feature_extraction", feat_conf['name'])
-            mlflow.log_param("ngram_range", str(feat_conf['ngram_range']))
-            mlflow.log_param("max_features", feat_conf['max_features'])
-            mlflow.log_param("model_type", model_type)
+        active_run = safe_start_run(run_name=run_tag)
+        mlflow_active = active_run is not None
+        if mlflow_active:
+            safe_set_tag("phase", "experimentation")
+            safe_log_param("scenario", scenario)
+            safe_log_param("feature_extraction", feat_conf['name'])
+            safe_log_param("ngram_range", str(feat_conf['ngram_range']))
+            safe_log_param("max_features", feat_conf['max_features'])
+            safe_log_param("model_type", model_type)
+            safe_log_param("threshold_tuning", use_threshold_tuning)
 
-            base_model = _make_model(model_type, MODEL_PARAMS[model_type])
+        base_model = _make_model(model_type, MODEL_PARAMS[model_type])
+        if mlflow_active:
             for param_name, param_val in base_model.get_params().items():
-                mlflow.log_param(param_name, param_val)
+                safe_log_param(param_name, param_val)
 
-            if is_powerset:
-                model = _make_model(model_type, MODEL_PARAMS[model_type])
-                model.fit(X_train, y_train_lp)
-                preds_val_lp = model.predict(X_val)
-                preds_val_bin = lp_converter.inverse_transform(preds_val_lp)
+        if is_powerset:
+            model = _make_model(model_type, MODEL_PARAMS[model_type])
+            model.fit(X_train, y_train_lp)
+            preds_val_lp = model.predict(X_val)
+            preds_val_bin = lp_converter.inverse_transform(preds_val_lp)
+            val_probs = None
+        else:
+            model = MultiOutputClassifier(_make_model(model_type, MODEL_PARAMS[model_type]))
+            if n_seen < n_total:
+                y_train_filtered = y_train[:, seen_labels]
+                model.fit(X_train, y_train_filtered)
+                preds_val_filtered = model.predict(X_val)
+                preds_val_bin = np.zeros((len(y_val), n_total), dtype=np.int32)
+                preds_val_bin[:, seen_labels] = preds_val_filtered
             else:
-                model = MultiOutputClassifier(_make_model(model_type, MODEL_PARAMS[model_type]))
-                if n_seen < n_total:
-                    y_train_filtered = y_train[:, seen_labels]
-                    model.fit(X_train, y_train_filtered)
-                    preds_val_filtered = model.predict(X_val)
-                    preds_val_bin = np.zeros((len(y_val), n_total), dtype=np.int32)
-                    preds_val_bin[:, seen_labels] = preds_val_filtered
-                else:
-                    model.fit(X_train, y_train)
-                    preds_val_bin = model.predict(X_val)
+                model.fit(X_train, y_train)
+                preds_val_bin = model.predict(X_val)
 
-            metrics_val = compute_all_metrics_binary(y_val, preds_val_bin, id_to_class, taxonomy)
+            val_probs = None
+            if use_threshold_tuning and model_type in ("LR", "SVM"):
+                try:
+                    proba_filtered = np.array([est.predict_proba(X_val)[:, 1] for est in model.estimators_]).T
+                    full_probs = np.zeros((len(y_val), n_total), dtype=np.float64)
+                    full_probs[:, seen_labels] = proba_filtered
+                    val_probs = full_probs
+                except Exception:
+                    val_probs = None
+
+        thresholds = None
+        if use_threshold_tuning and val_probs is not None and not is_powerset:
+            thresholds = optimize_thresholds(y_val, val_probs, id_to_class)
+            log_thresholds(thresholds, id_to_class, mlflow_log_fn=safe_log_metric)
+            preds_val_bin = apply_thresholds(val_probs, thresholds)
+
+        metrics_val = compute_all_metrics_binary(y_val, preds_val_bin, id_to_class, taxonomy)
+        if mlflow_active:
             for k, v in metrics_val.items():
-                mlflow.log_metric(f"val_{k}", v)
+                safe_log_metric(f"val_{k}", v)
 
-            os.makedirs("analysis", exist_ok=True)
-            val_analysis_path = f"analysis/val_analysis_{run_tag}.csv"
-            if is_fine:
-                save_manual_analysis_binary(
-                    val_texts_raw, y_val_fine, preds_val_bin,
-                    ID_TO_FINE, FINE_TO_BASIC_TAXONOMY,
-                    val_analysis_path,
-                )
-            else:
-                save_manual_analysis_binary(
-                    val_texts_raw, y_val_basic, preds_val_bin,
-                    ID_TO_BASIC, {}, val_analysis_path,
-                    y_true_extra=y_val_fine,
-                    y_pred_extra=None,
-                    id_to_extra=ID_TO_FINE,
-                )
+        os.makedirs(analysis_dir, exist_ok=True)
+        val_analysis_path = f"{analysis_dir}/val_analysis_{run_tag}.csv"
+        if is_fine:
+            save_manual_analysis_binary(
+                val_texts_raw, y_val_fine, preds_val_bin,
+                ID_TO_FINE, FINE_TO_BASIC_TAXONOMY,
+                val_analysis_path,
+            )
+        else:
+            save_manual_analysis_binary(
+                val_texts_raw, y_val_basic, preds_val_bin,
+                ID_TO_BASIC, {}, val_analysis_path,
+                y_true_extra=y_val_fine,
+                y_pred_extra=None,
+                id_to_extra=ID_TO_FINE,
+            )
 
-            logger.info(f"{run_tag} | Val F1-Macro: {metrics_val['f1_macro']:.4f}")
+        logger.info(f"{run_tag} | Val F1-Macro: {metrics_val['f1_macro']:.4f}")
 
-            try:
-                mlflow.sklearn.log_model(model, "model")
-            except Exception as e:
-                logger.warning(f"Failed to log model artifact: {e}")
+        try:
+            mlflow.sklearn.log_model(model, "model")
+        except Exception as e:
+            logger.warning(f"Failed to log model artifact: {e}")
 
-            result = {
-                'scenario': scenario,
-                'feature_name': feat_conf['name'],
-                'ngram_range': list(feat_conf['ngram_range']),
-                'max_features': feat_conf['max_features'],
-                'vectorizer_type': feat_conf['vectorizer'],
-                'model_type': model_type,
-                'val_f1_macro': float(metrics_val['f1_macro']),
-                'val_f1_micro': float(metrics_val['f1_micro']),
-                'val_subset_accuracy': float(metrics_val['subset_accuracy']),
-                'val_hamming_loss': float(metrics_val['hamming_loss']),
-            }
+        result = {
+            'scenario': scenario,
+            'feature_name': feat_conf['name'],
+            'ngram_range': list(feat_conf['ngram_range']),
+            'max_features': feat_conf['max_features'],
+            'vectorizer_type': feat_conf['vectorizer'],
+            'model_type': model_type,
+            'val_f1_macro': float(metrics_val['f1_macro']),
+            'val_f1_micro': float(metrics_val['f1_micro']),
+            'val_subset_accuracy': float(metrics_val['subset_accuracy']),
+            'val_hamming_loss': float(metrics_val['hamming_loss']),
+            'thresholds': thresholds,
+        }
     except Exception as e:
         logger.error(f"Run {run_tag} FAILED: {e}")
+
+    if mlflow_active:
+        safe_end_run()
+
     return run_tag, result
 
 
-def train_traditional(data_path: str, n_jobs=4):
+def train_traditional(data_path, n_jobs=4, config=None):
+    if config is None:
+        config = get_config("exp1")
+
     logger.info("Loading data...")
-    ckpt = CheckpointManager("checkpoints/traditional_checkpoint.json")
+    logger.info(f"Experiment: {config['experiment']}")
+    ckpt = CheckpointManager(config["checkpoint_trad"])
+    analysis_dir = config["analysis_dir"]
 
     (
         train_df, val_df, test_df,
@@ -228,7 +290,7 @@ def train_traditional(data_path: str, n_jobs=4):
     # ═══════════════════════════════════════════════════════════════
     # PHASE 1: EXPERIMENTATION — val metrics only, NO test
     # ═══════════════════════════════════════════════════════════════
-    mlflow.set_experiment("Traditional_ML_MultiLabel")
+    safe_set_experiment(config["mlflow_experiment_p1_trad"])
 
     total_runs = len(scenarios) * len(feature_configs) * len(MODEL_PARAMS)
     logger.info(f"PHASE 1: {total_runs} experimentation runs (val metrics only)...")
@@ -291,6 +353,9 @@ def train_traditional(data_path: str, n_jobs=4):
                     seen_labels=seen_labels, n_seen=n_seen, n_total=n_total,
                     ID_TO_BASIC=ID_TO_BASIC, ID_TO_FINE=ID_TO_FINE,
                     FINE_TO_BASIC_TAXONOMY=FINE_TO_BASIC_TAXONOMY,
+                    use_threshold_tuning=config["threshold_tuning"],
+                    mlflow_experiment_p1=config["mlflow_experiment_p1_trad"],
+                    analysis_dir=analysis_dir,
                 ))
 
     if run_args:
@@ -313,7 +378,7 @@ def train_traditional(data_path: str, n_jobs=4):
     if not phase1_results:
         logger.error("No Phase 1 results found. Cannot proceed to Phase 2.")
         return
-    mlflow.set_experiment("Traditional_ML_Final_Test")
+    safe_set_experiment(config["mlflow_experiment_p2_trad"])
     logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per scenario)...")
 
     train_val_df = pd.concat([train_df, val_df], ignore_index=True)
@@ -324,6 +389,7 @@ def train_traditional(data_path: str, n_jobs=4):
     for scenario in scenarios:
         scenario_results = [r for r in phase1_results if r['scenario'] == scenario]
         best = max(scenario_results, key=lambda x: x['val_f1_macro'])
+        best_thresholds = best.get('thresholds')
 
         logger.info(f"Best {scenario}: {best['feature_name']} + {best['model_type']} "
                      f"(val F1-Macro: {best['val_f1_macro']:.4f})")
@@ -373,73 +439,90 @@ def train_traditional(data_path: str, n_jobs=4):
             logger.info(f"Skipping {run_tag} (already completed)")
             continue
 
-        with mlflow.start_run(run_name=run_tag):
-            mlflow.set_tag("phase", "final_test")
-            mlflow.log_params({
+        active_run = safe_start_run(run_name=run_tag)
+        mlflow_active = active_run is not None
+        if mlflow_active:
+            safe_set_tag("phase", "final_test")
+            safe_log_params({
                 "scenario": scenario,
                 "feature_extraction": best['feature_name'],
                 "ngram_range": str(best['ngram_range']),
                 "max_features": best['max_features'],
                 "model_type": best['model_type'],
                 "selected_by_val_f1_macro": best['val_f1_macro'],
+                "threshold_tuning": config["threshold_tuning"],
             })
 
-            base_model = _make_model(best['model_type'], MODEL_PARAMS[best['model_type']])
+        base_model = _make_model(best['model_type'], MODEL_PARAMS[best['model_type']])
+        if mlflow_active:
             for param_name, param_val in base_model.get_params().items():
-                mlflow.log_param(param_name, param_val)
+                safe_log_param(param_name, param_val)
 
-            if is_powerset:
-                model = _make_model(best['model_type'], MODEL_PARAMS[best['model_type']])
-                model.fit(X_train_val, y_train_val_lp)
-                preds_test_lp = model.predict(X_test)
-                preds_test_bin = lp_converter_final.inverse_transform(preds_test_lp)
+        if is_powerset:
+            model = _make_model(best['model_type'], MODEL_PARAMS[best['model_type']])
+            model.fit(X_train_val, y_train_val_lp)
+            preds_test_lp = model.predict(X_test)
+            preds_test_bin = lp_converter_final.inverse_transform(preds_test_lp)
+        else:
+            model = MultiOutputClassifier(_make_model(best['model_type'], MODEL_PARAMS[best['model_type']]))
+            if n_seen_tv < n_total_tv:
+                y_train_val_filtered = y_train_val[:, seen_labels_tv]
+                model.fit(X_train_val, y_train_val_filtered)
+                preds_test_filtered = model.predict(X_test)
+                preds_test_bin = np.zeros((len(y_test), n_total_tv), dtype=np.int32)
+                preds_test_bin[:, seen_labels_tv] = preds_test_filtered
             else:
-                model = MultiOutputClassifier(_make_model(best['model_type'], MODEL_PARAMS[best['model_type']]))
-                if n_seen_tv < n_total_tv:
-                    y_train_val_filtered = y_train_val[:, seen_labels_tv]
-                    model.fit(X_train_val, y_train_val_filtered)
-                    preds_test_filtered = model.predict(X_test)
-                    preds_test_bin = np.zeros((len(y_test), n_total_tv), dtype=np.int32)
-                    preds_test_bin[:, seen_labels_tv] = preds_test_filtered
-                else:
-                    model.fit(X_train_val, y_train_val)
-                    preds_test_bin = model.predict(X_test)
+                model.fit(X_train_val, y_train_val)
+                preds_test_bin = model.predict(X_test)
 
-            metrics_test = compute_all_metrics_binary(y_test, preds_test_bin, id_to_class, taxonomy)
+            if config["threshold_tuning"] and best_thresholds and best['model_type'] in ("LR", "SVM"):
+                try:
+                    proba_filtered = np.array([est.predict_proba(X_test)[:, 1] for est in model.estimators_]).T
+                    full_probs = np.zeros((len(y_test), n_total_tv), dtype=np.float64)
+                    full_probs[:, seen_labels_tv] = proba_filtered
+                    preds_test_bin = apply_thresholds(full_probs, best_thresholds)
+                    logger.info(f"Applied optimized thresholds from Phase 1")
+                except Exception as e:
+                    logger.warning(f"Threshold application failed: {e}")
+
+        metrics_test = compute_all_metrics_binary(y_test, preds_test_bin, id_to_class, taxonomy)
+        if mlflow_active:
             for k, v in metrics_test.items():
-                mlflow.log_metric(f"test_{k}", v)
+                safe_log_metric(f"test_{k}", v)
 
-            os.makedirs("analysis", exist_ok=True)
-            analysis_path = f"analysis/final_test_analysis_{scenario}.csv"
-            if is_fine:
-                save_manual_analysis_binary(
-                    test_texts_raw, y_test_fine, preds_test_bin,
-                    ID_TO_FINE, FINE_TO_BASIC_TAXONOMY, analysis_path,
-                )
-            else:
-                save_manual_analysis_binary(
-                    test_texts_raw, y_test_basic, preds_test_bin,
-                    ID_TO_BASIC, {}, analysis_path,
-                    y_true_extra=y_test_fine,
-                    y_pred_extra=None,
-                    id_to_extra=ID_TO_FINE,
-                )
+        os.makedirs(analysis_dir, exist_ok=True)
+        analysis_path = f"{analysis_dir}/final_test_analysis_{scenario}.csv"
+        if is_fine:
+            save_manual_analysis_binary(
+                test_texts_raw, y_test_fine, preds_test_bin,
+                ID_TO_FINE, FINE_TO_BASIC_TAXONOMY, analysis_path,
+            )
+        else:
+            save_manual_analysis_binary(
+                test_texts_raw, y_test_basic, preds_test_bin,
+                ID_TO_BASIC, {}, analysis_path,
+                y_true_extra=y_test_fine,
+                y_pred_extra=None,
+                id_to_extra=ID_TO_FINE,
+            )
 
-            logger.info(f"FINAL {scenario} | Test F1-Macro: {metrics_test['f1_macro']:.4f} | "
-                        f"Subset Acc: {metrics_test['subset_accuracy']:.4f} | "
-                        f"Hamming Loss: {metrics_test['hamming_loss']:.4f}")
+        logger.info(f"FINAL {scenario} | Test F1-Macro: {metrics_test['f1_macro']:.4f} | "
+                    f"Subset Acc: {metrics_test['subset_accuracy']:.4f} | "
+                    f"Hamming Loss: {metrics_test['hamming_loss']:.4f}")
 
-            try:
-                mlflow.sklearn.log_model(model, "model")
-            except Exception as e:
-                logger.warning(f"Failed to log model artifact: {e}")
+        try:
+            mlflow.sklearn.log_model(model, "model")
+        except Exception as e:
+            logger.warning(f"Failed to log model artifact: {e}")
 
-            ckpt.mark_completed(run_tag)
+        ckpt.mark_completed(run_tag)
+        if mlflow_active:
+            safe_end_run()
 
     ckpt.mark_phase_complete(2)
     logger.info("\n=== Pipeline complete ===")
-    logger.info("Phase 1: 54 runs with val metrics → analysis/val_analysis_*.csv")
-    logger.info("Phase 2: 3 final runs with test metrics → analysis/final_test_analysis_*.csv")
+    logger.info(f"Phase 1: 54 runs with val metrics → {analysis_dir}/val_analysis_*.csv")
+    logger.info(f"Phase 2: 3 final runs with test metrics → {analysis_dir}/final_test_analysis_*.csv")
 
 
 if __name__ == "__main__":

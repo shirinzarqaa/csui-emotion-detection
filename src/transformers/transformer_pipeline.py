@@ -5,18 +5,26 @@ import pandas as pd
 import torch
 import mlflow
 from datasets import Dataset as HFDataset
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments, DataCollatorWithPadding
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments, DataCollatorWithPadding, EarlyStoppingCallback
 from loguru import logger
 
 from src.data_loader import prepare_data
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
+from src.utils.threshold_tuning import optimize_thresholds, apply_thresholds, log_thresholds
 from src.utils.checkpoint import CheckpointManager
 from src.utils.mlflow_utils import safe_set_experiment, safe_start_run, safe_end_run, safe_log_param, safe_log_params, safe_log_metric, safe_log_metrics, safe_set_tag
+from src.utils.experiment_config import get_config
 
 
-def train_transformers(data_path: str):
+def train_transformers(data_path, config=None):
+    if config is None:
+        config = get_config("exp1")
+
     logger.info("Loading data...")
-    ckpt = CheckpointManager("checkpoints/transformers_checkpoint.json")
+    logger.info(f"Experiment: {config['experiment']}")
+    ckpt = CheckpointManager(config["checkpoint_tf"])
+    analysis_dir = config["analysis_dir"]
+    saved_models_dir = config["saved_models_dir"]
 
     (
         train_df, val_df, test_df,
@@ -35,15 +43,16 @@ def train_transformers(data_path: str):
         "mmBERT": "jhu-clsp/mmBERT-base",
     }
 
-    learning_rates = [2e-5, 3e-5, 5e-5]
-    batch_sizes = [32]
-    num_epochs = 3
+    learning_rates = config["tf_learning_rates"]
+    batch_sizes = config["tf_batch_sizes"]
+    num_epochs = config["tf_epochs"]
+    max_len = config["tf_max_len"]
     target_levels = ['basic', 'fine']
 
     # ═══════════════════════════════════════════════════════════════
     # PHASE 1: EXPERIMENTATION — val metrics only, NO test
     # ═══════════════════════════════════════════════════════════════
-    safe_set_experiment("Transformer_MultiLabel")
+    safe_set_experiment(config["mlflow_experiment_p1_tf"])
     phase1_results = ckpt.get_phase1_results()
     logger.info("PHASE 1: Experimentation runs (val metrics only)...")
 
@@ -57,7 +66,7 @@ def train_transformers(data_path: str):
             continue
 
         def tokenize_function(examples):
-            return tokenizer(examples["text"], padding=False, truncation=True, max_length=128)
+            return tokenizer(examples["text"], padding=False, truncation=True, max_length=max_len)
 
         for target in target_levels:
             is_basic = (target == 'basic')
@@ -111,6 +120,10 @@ def train_transformers(data_path: str):
                         logger.error(f"    Failed to load model for {hpo_run_name}: {e}")
                         continue
 
+                    callbacks = []
+                    if config["tf_patience"] is not None:
+                        callbacks.append(EarlyStoppingCallback(early_stopping_patience=config["tf_patience"]))
+
                     training_args = TrainingArguments(
                         output_dir=f"./results/{hpo_run_name}",
                         learning_rate=lr,
@@ -134,6 +147,7 @@ def train_transformers(data_path: str):
                         eval_dataset=tokenized_val,
                         data_collator=data_collator,
                         compute_metrics=compute_metrics_hf,
+                        callbacks=callbacks,
                     )
 
                     active_run = safe_start_run(run_name=hpo_run_name)
@@ -145,6 +159,8 @@ def train_transformers(data_path: str):
                         safe_log_param("learning_rate", lr)
                         safe_log_param("batch_size", bs)
                         safe_log_param("num_epochs", num_epochs)
+                        safe_log_param("max_len", max_len)
+                        safe_log_param("threshold_tuning", config["threshold_tuning"])
 
                     trainer.train()
 
@@ -159,11 +175,18 @@ def train_transformers(data_path: str):
                     preds_output = trainer.predict(tokenized_val)
                     val_logits = preds_output.predictions
                     val_probs = torch.sigmoid(torch.tensor(val_logits)).numpy()
-                    y_val_pred = (val_probs >= 0.5).astype(np.int32)
                     y_val_true = preds_output.label_ids
 
-                    os.makedirs("analysis", exist_ok=True)
-                    val_analysis_path = f"analysis/val_analysis_{hpo_run_name}.csv"
+                    thresholds = None
+                    if config["threshold_tuning"]:
+                        thresholds = optimize_thresholds(y_val_true, val_probs, id_to_label)
+                        log_thresholds(thresholds, id_to_label, mlflow_log_fn=safe_log_metric)
+                        y_val_pred = apply_thresholds(val_probs, thresholds)
+                    else:
+                        y_val_pred = (val_probs >= 0.5).astype(np.int32)
+
+                    os.makedirs(analysis_dir, exist_ok=True)
+                    val_analysis_path = f"{analysis_dir}/val_analysis_{hpo_run_name}.csv"
                     save_manual_analysis_binary(
                         val_df["text"].tolist(),
                         y_val_true,
@@ -180,6 +203,7 @@ def train_transformers(data_path: str):
                         'learning_rate': lr,
                         'batch_size': bs,
                         'val_f1_macro': val_f1_macro,
+                        'thresholds': thresholds,
                     })
                     ckpt.add_phase1_result({
                         'model_name': model_name,
@@ -188,15 +212,18 @@ def train_transformers(data_path: str):
                         'learning_rate': lr,
                         'batch_size': bs,
                         'val_f1_macro': float(val_f1_macro),
+                        'thresholds': thresholds,
                     })
                     ckpt.mark_completed(hpo_run_name)
 
                     logger.info(f"    {hpo_run_name} | Val F1-Macro: {val_f1_macro:.4f}")
 
-                    save_dir = f"saved_models/{hpo_run_name}"
+                    save_dir = f"{saved_models_dir}/{hpo_run_name}"
                     os.makedirs(save_dir, exist_ok=True)
                     trainer.save_model(save_dir)
                     tokenizer.save_pretrained(save_dir)
+                    if thresholds:
+                        np.save(f"{save_dir}/thresholds.npy", thresholds)
                     logger.info(f"    Model saved to {save_dir}/")
 
                     if mlflow_active:
@@ -217,7 +244,7 @@ def train_transformers(data_path: str):
     if not phase1_results:
         logger.error("No Phase 1 results found. Cannot proceed to Phase 2.")
         return
-    safe_set_experiment("Transformer_Final_Test")
+    safe_set_experiment(config["mlflow_experiment_p2_tf"])
     logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per model+target)...")
 
     train_val_df = pd.concat([train_df, val_df], ignore_index=True)
@@ -231,7 +258,7 @@ def train_transformers(data_path: str):
             continue
 
         def tokenize_function_tv(examples):
-            return tokenizer(examples["text"], padding=False, truncation=True, max_length=128)
+            return tokenizer(examples["text"], padding=False, truncation=True, max_length=max_len)
 
         for target in target_levels:
             model_target_results = [
@@ -243,6 +270,7 @@ def train_transformers(data_path: str):
                 continue
 
             best = max(model_target_results, key=lambda x: x['val_f1_macro'])
+            best_thresholds = best.get('thresholds')
             logger.info(f"Best {model_name}/{target}: lr={best['learning_rate']}, bs={best['batch_size']} "
                          f"(val F1-Macro: {best['val_f1_macro']:.4f})")
 
@@ -320,7 +348,9 @@ def train_transformers(data_path: str):
                     "learning_rate": best['learning_rate'],
                     "batch_size": best['batch_size'],
                     "num_epochs": num_epochs,
+                    "max_len": max_len,
                     "selected_by_val_f1_macro": best['val_f1_macro'],
+                    "threshold_tuning": config["threshold_tuning"],
                 })
 
             logger.info(f"Phase 2: Fine-tuning {final_run_name} on train+val ({len(train_val_df)} samples)...")
@@ -330,16 +360,21 @@ def train_transformers(data_path: str):
             preds_output = trainer.predict(tokenized_test)
             logits = preds_output.predictions
             probs = torch.sigmoid(torch.tensor(logits)).numpy()
-            y_pred_binary = (probs >= 0.5).astype(np.int32)
             y_true_binary = preds_output.label_ids
+
+            if config["threshold_tuning"] and best_thresholds:
+                y_pred_binary = apply_thresholds(probs, best_thresholds)
+                logger.info(f"Using optimized thresholds from Phase 1")
+            else:
+                y_pred_binary = (probs >= 0.5).astype(np.int32)
 
             test_metrics = compute_all_metrics_binary(y_true_binary, y_pred_binary, id_to_label, class_to_parent)
             if mlflow_active:
                 for k, v in test_metrics.items():
                     safe_log_metric(f"test_{k}", v)
 
-            os.makedirs("analysis", exist_ok=True)
-            analysis_path = f"analysis/final_test_analysis_{final_run_name}.csv"
+            os.makedirs(analysis_dir, exist_ok=True)
+            analysis_path = f"{analysis_dir}/final_test_analysis_{final_run_name}.csv"
             save_manual_analysis_binary(
                 test_texts_raw,
                 y_true_binary,
@@ -360,10 +395,12 @@ def train_transformers(data_path: str):
                     logger.warning(f"Failed to log model artifact: {e}")
                 safe_end_run()
 
-            save_dir = f"saved_models/{final_run_name}"
+            save_dir = f"{saved_models_dir}/{final_run_name}"
             os.makedirs(save_dir, exist_ok=True)
             trainer.save_model(save_dir)
             tokenizer.save_pretrained(save_dir)
+            if best_thresholds:
+                np.save(f"{save_dir}/thresholds.npy", best_thresholds)
             logger.info(f"Model saved to {save_dir}/")
 
             ckpt.mark_completed(final_run_name)
@@ -373,8 +410,8 @@ def train_transformers(data_path: str):
 
     ckpt.mark_phase_complete(2)
     logger.info("\n=== Transformer pipeline complete ===")
-    logger.info("Phase 1: 30 runs with val metrics → analysis/val_analysis_*.csv, saved_models/")
-    logger.info("Phase 2: 10 final runs with test metrics → analysis/final_test_analysis_*.csv, saved_models/")
+    logger.info(f"Phase 1: 30 runs with val metrics → {analysis_dir}/val_analysis_*.csv, {saved_models_dir}/")
+    logger.info(f"Phase 2: 10 final runs with test metrics → {analysis_dir}/final_test_analysis_*.csv, {saved_models_dir}/")
 
 
 if __name__ == "__main__":

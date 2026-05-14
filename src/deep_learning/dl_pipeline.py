@@ -14,8 +14,11 @@ from loguru import logger
 
 from src.data_loader import prepare_data
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
+from src.utils.threshold_tuning import optimize_thresholds, apply_thresholds, log_thresholds
 from src.deep_learning.models import BiLSTM, TextCNN, FastTextDataset, BertDataset
 from src.utils.checkpoint import CheckpointManager
+from src.utils.mlflow_utils import safe_set_experiment, safe_start_run, safe_end_run, safe_log_param, safe_log_params, safe_log_metric, safe_log_metrics, safe_set_tag
+from src.utils.experiment_config import get_config
 
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '.fasttext_cache')
@@ -114,6 +117,15 @@ def fine_to_basic_predictions(y_pred_fine, basic_to_id, id_to_fine, fine_to_basi
     return y_pred_basic
 
 
+def compute_pos_weight(y_train):
+    num_pos = y_train.sum(axis=0)
+    num_neg = y_train.shape[0] - num_pos
+    num_neg = np.maximum(num_neg, 1)
+    num_pos = np.maximum(num_pos, 1)
+    pw = num_neg / num_pos
+    return torch.tensor(pw, dtype=torch.float32).to(DEVICE)
+
+
 def train_epoch(model, loader, optimizer, criterion, device, bert_mode=False):
     model.train()
     total_loss = 0.0
@@ -131,6 +143,23 @@ def train_epoch(model, loader, optimizer, criterion, device, bert_mode=False):
         optimizer.step()
         total_loss += loss.item()
     return total_loss / len(loader)
+
+
+@torch.no_grad()
+def predict_probs(model, loader, device, bert_mode=False):
+    model.eval()
+    all_probs, all_labels = [], []
+    for batch in loader:
+        if bert_mode:
+            input_ids, attention_mask, labels = [b.to(device) for b in batch]
+            outputs = model(input_ids, attention_mask)
+        else:
+            token_ids, labels = [b.to(device) for b in batch]
+            outputs = model(token_ids)
+        probs = torch.sigmoid(outputs).cpu().numpy()
+        all_probs.append(probs)
+        all_labels.append(labels.cpu().numpy().astype(np.int32))
+    return np.concatenate(all_probs, axis=0), np.concatenate(all_labels, axis=0)
 
 
 @torch.no_grad()
@@ -156,8 +185,8 @@ def evaluate(model, loader, criterion, device, bert_mode=False):
 
 
 def _build_model(embedding_type, model_type, param_value, num_classes,
-                 word_to_id=None, emb_matrix=None, embed_dim=None,
-                 bert_model=None, tokenizer=None):
+                  word_to_id=None, emb_matrix=None, embed_dim=None,
+                  bert_model=None, tokenizer=None):
     if model_type == 'bilstm':
         classifier = BiLSTM(embed_dim, hidden_dim=param_value, num_classes=num_classes)
     elif model_type == 'cnn':
@@ -221,9 +250,13 @@ def train_and_evaluate_val(
     num_epochs=30,
     batch_size=32,
     lr=1e-3,
-    patience=3,
+    patience=5,
     max_len=128,
     val_texts_raw=None,
+    use_pos_weight=False,
+    use_threshold_tuning=False,
+    analysis_dir="analysis",
+    saved_models_dir="saved_models",
 ):
     is_basic = (target_level == 'basic')
     num_classes = len(BASIC_TO_ID) if is_basic else len(FINE_TO_ID)
@@ -256,7 +289,12 @@ def train_and_evaluate_val(
         tokenizer=tokenizer if embedding_type == 'indobert' else None,
     )
 
-    criterion = nn.BCEWithLogitsLoss()
+    if use_pos_weight:
+        pos_weight = compute_pos_weight(y_train)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        logger.info(f"Using pos_weight: mean={pos_weight.mean():.2f}, max={pos_weight.max():.2f}")
+    else:
+        criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     best_val_f1 = -1.0
@@ -277,7 +315,7 @@ def train_and_evaluate_val(
                 f"tr_loss={train_loss:.4f} | vl_loss={val_loss:.4f} | "
                 f"vl_f1_m={val_f1:.4f}"
             )
-            mlflow.log_metrics({
+            safe_log_metrics({
                 "train_loss": train_loss,
                 "val_loss": val_loss,
                 **{f"val_{k}": v for k, v in val_metrics.items()},
@@ -292,7 +330,7 @@ def train_and_evaluate_val(
                 f"vl_f1_m={val_f1:.4f} | "
                 f"vl_basic_f1_m={val_basic_metrics['f1_macro']:.4f}"
             )
-            mlflow.log_metrics({
+            safe_log_metrics({
                 "train_loss": train_loss,
                 "val_loss": val_loss,
                 **{f"val_{k}": v for k, v in val_metrics.items()},
@@ -314,18 +352,27 @@ def train_and_evaluate_val(
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    _, y_val_true, y_val_pred = evaluate(model, val_loader, criterion, DEVICE, bert_mode=bert_mode)
+    val_probs, y_val_true = predict_probs(model, val_loader, DEVICE, bert_mode=bert_mode)
+
+    if use_threshold_tuning:
+        thresholds = optimize_thresholds(y_val_true, val_probs, id_to_class)
+        log_thresholds(thresholds, id_to_class, mlflow_log_fn=safe_log_metric)
+        y_val_pred = apply_thresholds(val_probs, thresholds)
+    else:
+        y_val_pred = (val_probs >= 0.5).astype(np.int32)
+        thresholds = None
+
     final_val_metrics = compute_all_metrics_binary(y_val_true, y_val_pred, id_to_class, class_to_parent)
     for k, v in final_val_metrics.items():
-        mlflow.log_metric(f"val_{k}", v)
+        safe_log_metric(f"val_{k}", v)
     if not is_basic:
         y_val_pred_basic = fine_to_basic_predictions(y_val_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
         final_val_basic = compute_all_metrics_binary(y_val_basic, y_val_pred_basic, ID_TO_BASIC, {})
         for k, v in final_val_basic.items():
-            mlflow.log_metric(f"val_basic_{k}", v)
+            safe_log_metric(f"val_basic_{k}", v)
 
-    os.makedirs("analysis", exist_ok=True)
-    val_analysis_path = f"analysis/val_analysis_{run_tag}.csv"
+    os.makedirs(analysis_dir, exist_ok=True)
+    val_analysis_path = f"{analysis_dir}/val_analysis_{run_tag}.csv"
     if is_basic:
         save_manual_analysis_binary(
             val_texts_raw, y_val_true, y_val_pred,
@@ -339,6 +386,13 @@ def train_and_evaluate_val(
             val_texts_raw, y_val_true, y_val_pred,
             ID_TO_FINE, FINE_TO_BASIC_TAXONOMY, val_analysis_path,
         )
+
+    save_dir = f"{saved_models_dir}/{run_tag}"
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(model.state_dict(), f"{save_dir}/model.pt")
+    if thresholds:
+        np.save(f"{save_dir}/thresholds.npy", thresholds)
+    logger.info(f"Model saved to {save_dir}/")
 
     try:
         mlflow.pytorch.log_model(model, "model")
@@ -355,6 +409,7 @@ def train_and_evaluate_val(
         'target_level': target_level,
         'val_f1_macro': best_val_f1,
         'best_epoch': best_epoch,
+        'thresholds': thresholds,
     }
 
 
@@ -376,6 +431,12 @@ def retrain_and_test(
     batch_size=32,
     lr=1e-3,
     max_len=128,
+    use_pos_weight=False,
+    use_threshold_tuning=False,
+    val_texts=None,
+    y_val=None,
+    analysis_dir="analysis",
+    saved_models_dir="saved_models",
 ):
     is_basic = (target_level == 'basic')
     num_classes = len(BASIC_TO_ID) if is_basic else len(FINE_TO_ID)
@@ -408,27 +469,48 @@ def retrain_and_test(
         tokenizer=tokenizer if embedding_type == 'indobert' else None,
     )
 
-    criterion = nn.BCEWithLogitsLoss()
+    if use_pos_weight:
+        pos_weight = compute_pos_weight(y_train_val)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     for epoch in range(1, best_epoch + 1):
         train_loss = train_epoch(model, train_val_loader, optimizer, criterion, DEVICE, bert_mode=bert_mode)
         logger.info(f"  Phase 2 Epoch {epoch}/{best_epoch} | train_loss={train_loss:.4f}")
 
-    _, y_test_true, y_test_pred = evaluate(model, test_loader, criterion, DEVICE, bert_mode=bert_mode)
+    test_probs, y_test_true = predict_probs(model, test_loader, DEVICE, bert_mode=bert_mode)
+
+    thresholds = None
+    if use_threshold_tuning and val_texts is not None and y_val is not None:
+        val_ds = _build_datasets(embedding_type, val_texts, y_val,
+                                 word_to_id=word_to_id if embedding_type == 'fasttext' else None,
+                                 tokenizer=tokenizer if embedding_type == 'indobert' else None,
+                                 max_len=max_len)
+        val_loader = DataLoader(val_ds, batch_size=batch_size)
+        val_probs, y_val_true = predict_probs(model, val_loader, DEVICE, bert_mode=bert_mode)
+        thresholds = optimize_thresholds(y_val_true, val_probs, id_to_class)
+        log_thresholds(thresholds, id_to_class, mlflow_log_fn=safe_log_metric)
+
+    if thresholds:
+        y_test_pred = apply_thresholds(test_probs, thresholds)
+    else:
+        y_test_pred = (test_probs >= 0.5).astype(np.int32)
+
     test_metrics = compute_all_metrics_binary(y_test_true, y_test_pred, id_to_class, class_to_parent)
 
     for k, v in test_metrics.items():
-        mlflow.log_metric(f"test_{k}", v)
+        safe_log_metric(f"test_{k}", v)
 
     if not is_basic:
         y_test_pred_basic = fine_to_basic_predictions(y_test_pred, BASIC_TO_ID, ID_TO_FINE, FINE_TO_BASIC_TAXONOMY)
         test_basic = compute_all_metrics_binary(y_test_basic, y_test_pred_basic, ID_TO_BASIC, {})
         for k, v in test_basic.items():
-            mlflow.log_metric(f"test_basic_{k}", v)
+            safe_log_metric(f"test_basic_{k}", v)
 
-    os.makedirs("analysis", exist_ok=True)
-    analysis_path = f"analysis/final_test_analysis_{run_tag}.csv"
+    os.makedirs(analysis_dir, exist_ok=True)
+    analysis_path = f"{analysis_dir}/final_test_analysis_{run_tag}.csv"
     if is_basic:
         save_manual_analysis_binary(
             test_texts_raw, y_test_true, y_test_pred,
@@ -447,6 +529,13 @@ def retrain_and_test(
                 f"Subset Acc: {test_metrics['subset_accuracy']:.4f} | "
                 f"Hamming Loss: {test_metrics['hamming_loss']:.4f}")
 
+    save_dir = f"{saved_models_dir}/{run_tag}"
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(model.state_dict(), f"{save_dir}/model.pt")
+    if thresholds:
+        np.save(f"{save_dir}/thresholds.npy", thresholds)
+    logger.info(f"Model saved to {save_dir}/")
+
     try:
         mlflow.pytorch.log_model(model, "model")
     except Exception as e:
@@ -455,10 +544,15 @@ def retrain_and_test(
     return test_metrics
 
 
-def train_dl(data_path):
+def train_dl(data_path, config=None):
+    if config is None:
+        config = get_config("exp1")
+
     logger.info("=== Deep Learning Multi-Label Emotion Classification ===")
     logger.info(f"Device: {DEVICE}")
-    ckpt = CheckpointManager("checkpoints/dl_checkpoint.json")
+    logger.info(f"Experiment: {config['experiment']}")
+
+    ckpt = CheckpointManager(config["checkpoint_dl"])
 
     (
         train_df, val_df, test_df,
@@ -484,10 +578,13 @@ def train_dl(data_path):
     y_val_basic = y_val_basic.astype(np.float32)
     y_test_basic = y_test_basic.astype(np.float32)
 
+    analysis_dir = config["analysis_dir"]
+    saved_models_dir = config["saved_models_dir"]
+
     # ═══════════════════════════════════════════════════════════════
     # PHASE 1: EXPERIMENTATION — val metrics only, NO test
     # ═══════════════════════════════════════════════════════════════
-    mlflow.set_experiment("Deep_Learning_MultiLabel")
+    safe_set_experiment(config["mlflow_experiment_p1_dl"])
     phase1_results = ckpt.get_phase1_results()
     logger.info("PHASE 1: Experimentation runs (val metrics only)...")
 
@@ -505,6 +602,13 @@ def train_dl(data_path):
         ID_TO_FINE=ID_TO_FINE,
         FINE_TO_BASIC_TAXONOMY=FINE_TO_BASIC_TAXONOMY,
         val_texts_raw=val_texts_raw,
+        num_epochs=config["dl_epochs"],
+        patience=config["dl_patience"],
+        max_len=config["dl_max_len"],
+        use_pos_weight=config["pos_weight"],
+        use_threshold_tuning=config["threshold_tuning"],
+        analysis_dir=analysis_dir,
+        saved_models_dir=saved_models_dir,
     )
 
     for emb_type in embedding_configs:
@@ -519,9 +623,11 @@ def train_dl(data_path):
                 logger.info(f"Skipping {run_tag} (already completed)")
                 continue
 
-            with mlflow.start_run(run_name=run_tag):
-                mlflow.set_tag("phase", "experimentation")
-                mlflow.log_params({
+            active_run = safe_start_run(run_name=run_tag)
+            mlflow_active = active_run is not None
+            if mlflow_active:
+                safe_set_tag("phase", "experimentation")
+                safe_log_params({
                     "model_type": "bilstm",
                     "embedding_type": emb_type,
                     "embed_dim": 300 if emb_type == 'fasttext' else 768,
@@ -529,24 +635,30 @@ def train_dl(data_path):
                     "target_level": target,
                     "batch_size": 32,
                     "learning_rate": 1e-3,
+                    "pos_weight": config["pos_weight"],
+                    "threshold_tuning": config["threshold_tuning"],
+                    "max_len": config["dl_max_len"],
                 })
-                try:
-                    result = train_and_evaluate_val(
-                        embedding_type=emb_type,
-                        model_type='bilstm',
-                        param_value=128,
-                        target_level=target,
-                        y_train=y_train,
-                        y_val=y_val,
-                        **common_kwargs,
-                    )
-                    phase1_results.append(result)
-                    ckpt.add_phase1_result(result)
-                    ckpt.mark_completed(run_tag)
-                except Exception as e:
-                    logger.error(f"Run {run_tag} FAILED: {e}")
-                    mlflow.log_param("status", "failed")
-                    mlflow.log_param("error", str(e))
+            try:
+                result = train_and_evaluate_val(
+                    embedding_type=emb_type,
+                    model_type='bilstm',
+                    param_value=128,
+                    target_level=target,
+                    y_train=y_train,
+                    y_val=y_val,
+                    **common_kwargs,
+                )
+                phase1_results.append(result)
+                ckpt.add_phase1_result(result)
+                ckpt.mark_completed(run_tag)
+            except Exception as e:
+                logger.error(f"Run {run_tag} FAILED: {e}")
+                if mlflow_active:
+                    safe_log_param("status", "failed")
+                    safe_log_param("error", str(e)[:200])
+            if mlflow_active:
+                safe_end_run()
 
             run_tag = f"cnn_{emb_type}_{target}"
 
@@ -554,9 +666,11 @@ def train_dl(data_path):
                 logger.info(f"Skipping {run_tag} (already completed)")
                 continue
 
-            with mlflow.start_run(run_name=run_tag):
-                mlflow.set_tag("phase", "experimentation")
-                mlflow.log_params({
+            active_run = safe_start_run(run_name=run_tag)
+            mlflow_active = active_run is not None
+            if mlflow_active:
+                safe_set_tag("phase", "experimentation")
+                safe_log_params({
                     "model_type": "cnn",
                     "embedding_type": emb_type,
                     "embed_dim": 300 if emb_type == 'fasttext' else 768,
@@ -564,24 +678,30 @@ def train_dl(data_path):
                     "target_level": target,
                     "batch_size": 32,
                     "learning_rate": 1e-3,
+                    "pos_weight": config["pos_weight"],
+                    "threshold_tuning": config["threshold_tuning"],
+                    "max_len": config["dl_max_len"],
                 })
-                try:
-                    result = train_and_evaluate_val(
-                        embedding_type=emb_type,
-                        model_type='cnn',
-                        param_value=100,
-                        target_level=target,
-                        y_train=y_train,
-                        y_val=y_val,
-                        **common_kwargs,
-                    )
-                    phase1_results.append(result)
-                    ckpt.add_phase1_result(result)
-                    ckpt.mark_completed(run_tag)
-                except Exception as e:
-                    logger.error(f"Run {run_tag} FAILED: {e}")
-                    mlflow.log_param("status", "failed")
-                    mlflow.log_param("error", str(e))
+            try:
+                result = train_and_evaluate_val(
+                    embedding_type=emb_type,
+                    model_type='cnn',
+                    param_value=100,
+                    target_level=target,
+                    y_train=y_train,
+                    y_val=y_val,
+                    **common_kwargs,
+                )
+                phase1_results.append(result)
+                ckpt.add_phase1_result(result)
+                ckpt.mark_completed(run_tag)
+            except Exception as e:
+                logger.error(f"Run {run_tag} FAILED: {e}")
+                if mlflow_active:
+                    safe_log_param("status", "failed")
+                    safe_log_param("error", str(e)[:200])
+            if mlflow_active:
+                safe_end_run()
 
     logger.info(f"\nPHASE 1 complete. {len(phase1_results)} runs logged (val metrics only).")
     ckpt.mark_phase_complete(1)
@@ -593,7 +713,7 @@ def train_dl(data_path):
     if not phase1_results:
         logger.error("No Phase 1 results found. Cannot proceed to Phase 2.")
         return
-    mlflow.set_experiment("Deep_Learning_Final_Test")
+    safe_set_experiment(config["mlflow_experiment_p2_dl"])
     logger.info("\nPHASE 2: Retraining best models on train+val, evaluating on test (ONCE per target)...")
 
     train_val_df = pd.concat([train_df, val_df], ignore_index=True)
@@ -620,47 +740,61 @@ def train_dl(data_path):
             logger.info(f"Skipping {run_tag} (already completed)")
             continue
 
-        with mlflow.start_run(run_name=run_tag):
-            mlflow.set_tag("phase", "final_test")
-            mlflow.log_params({
+        active_run = safe_start_run(run_name=run_tag)
+        mlflow_active = active_run is not None
+        if mlflow_active:
+            safe_set_tag("phase", "final_test")
+            safe_log_params({
                 "model_type": best['model_type'],
                 "embedding_type": best['embedding_type'],
                 "target_level": target,
                 "best_epoch": best['best_epoch'],
                 "selected_by_val_f1_macro": best['val_f1_macro'],
                 "hidden_dim" if best['model_type'] == 'bilstm' else "num_filters": 128 if best['model_type'] == 'bilstm' else 100,
+                "pos_weight": config["pos_weight"],
+                "threshold_tuning": config["threshold_tuning"],
             })
 
-            try:
-                retrain_and_test(
-                    embedding_type=best['embedding_type'],
-                    model_type=best['model_type'],
-                    param_value=128 if best['model_type'] == 'bilstm' else 100,
-                    target_level=target,
-                    best_epoch=best['best_epoch'],
-                    train_val_texts=train_val_texts,
-                    test_texts=test_texts,
-                    y_train_val=y_train_val,
-                    y_test=y_test,
-                    y_test_basic=y_test_basic,
-                    y_train_val_basic=y_train_val_basic,
-                    BASIC_TO_ID=BASIC_TO_ID,
-                    ID_TO_BASIC=ID_TO_BASIC,
-                    FINE_TO_ID=FINE_TO_ID,
-                    ID_TO_FINE=ID_TO_FINE,
-                    FINE_TO_BASIC_TAXONOMY=FINE_TO_BASIC_TAXONOMY,
-                    test_texts_raw=test_texts_raw,
-                )
-                ckpt.mark_completed(run_tag)
-            except Exception as e:
-                logger.error(f"Phase 2 run {run_tag} FAILED: {e}")
-                mlflow.log_param("status", "failed")
-                mlflow.log_param("error", str(e))
+        try:
+            retrain_and_test(
+                embedding_type=best['embedding_type'],
+                model_type=best['model_type'],
+                param_value=128 if best['model_type'] == 'bilstm' else 100,
+                target_level=target,
+                best_epoch=best['best_epoch'],
+                train_val_texts=train_val_texts,
+                test_texts=test_texts,
+                y_train_val=y_train_val,
+                y_test=y_test,
+                y_test_basic=y_test_basic,
+                y_train_val_basic=y_train_val_basic,
+                BASIC_TO_ID=BASIC_TO_ID,
+                ID_TO_BASIC=ID_TO_BASIC,
+                FINE_TO_ID=FINE_TO_ID,
+                ID_TO_FINE=ID_TO_FINE,
+                FINE_TO_BASIC_TAXONOMY=FINE_TO_BASIC_TAXONOMY,
+                test_texts_raw=test_texts_raw,
+                max_len=config["dl_max_len"],
+                use_pos_weight=config["pos_weight"],
+                use_threshold_tuning=config["threshold_tuning"],
+                val_texts=val_texts,
+                y_val=y_val_basic if is_basic else y_val_fine,
+                analysis_dir=analysis_dir,
+                saved_models_dir=saved_models_dir,
+            )
+            ckpt.mark_completed(run_tag)
+        except Exception as e:
+            logger.error(f"Phase 2 run {run_tag} FAILED: {e}")
+            if mlflow_active:
+                safe_log_param("status", "failed")
+                safe_log_param("error", str(e)[:200])
+        if mlflow_active:
+            safe_end_run()
 
     ckpt.mark_phase_complete(2)
     logger.info("=== Deep Learning pipeline complete ===")
-    logger.info("Phase 1: 8 runs with val metrics → analysis/val_analysis_*.csv")
-    logger.info("Phase 2: 2 final runs with test metrics → analysis/final_test_analysis_*.csv")
+    logger.info(f"Phase 1: 8 runs with val metrics → {analysis_dir}/val_analysis_*.csv")
+    logger.info(f"Phase 2: 2 final runs with test metrics → {analysis_dir}/final_test_analysis_*.csv")
 
 
 if __name__ == '__main__':
