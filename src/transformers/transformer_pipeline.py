@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 import mlflow
 from datasets import Dataset as HFDataset
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments, DataCollatorWithPadding, EarlyStoppingCallback
@@ -11,9 +12,43 @@ from loguru import logger
 from src.data_loader import prepare_data
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
 from src.utils.threshold_tuning import optimize_thresholds, apply_thresholds, log_thresholds
+from src.utils.focal_loss import FocalLoss
 from src.utils.checkpoint import CheckpointManager
 from src.utils.mlflow_utils import safe_set_experiment, safe_start_run, safe_end_run, safe_log_param, safe_log_params, safe_log_metric, safe_log_metrics, safe_set_tag
 from src.utils.experiment_config import get_config
+
+
+def compute_pos_weights(y_train):
+    pos_counts = np.array(y_train).sum(axis=0)
+    neg_counts = len(y_train) - pos_counts
+    pw = np.clip(neg_counts / np.clip(pos_counts, 1, None), 1.0, 10.0)
+    return torch.tensor(pw, dtype=torch.float32)
+
+
+class WeightedTrainer(Trainer):
+    def __init__(self, pos_weights=None, use_focal_loss=False, focal_gamma=2.0, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pos_weights = pos_weights
+        self.use_focal_loss = use_focal_loss
+        self.focal_gamma = focal_gamma
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+
+        if self.use_focal_loss:
+            alpha = self.pos_weights.to(logits.device) if self.pos_weights is not None else None
+            loss_fct = FocalLoss(alpha=alpha, gamma=self.focal_gamma)
+            loss = loss_fct(logits, labels.float())
+        elif self.pos_weights is not None:
+            loss_fct = nn.BCEWithLogitsLoss(pos_weight=self.pos_weights.to(logits.device))
+            loss = loss_fct(logits, labels.float())
+        else:
+            loss_fct = nn.BCEWithLogitsLoss()
+            loss = loss_fct(logits, labels.float())
+
+        return (loss, outputs) if return_outputs else loss
 
 
 def train_transformers(data_path, config=None):
@@ -98,6 +133,10 @@ def train_transformers(data_path, config=None):
                 preds = (probs >= 0.5).astype(np.int32)
                 return compute_all_metrics_binary(labels, preds, _id2label, _parent)
 
+            pos_weights = None
+            if config["pos_weight"]:
+                pos_weights = compute_pos_weights(y_train_labels)
+
             for lr in learning_rates:
                 for bs in batch_sizes:
                     hpo_run_name = f"{model_name}_{target}_lr{lr}_bs{bs}"
@@ -140,7 +179,10 @@ def train_transformers(data_path, config=None):
                         run_name=hpo_run_name,
                     )
 
-                    trainer = Trainer(
+                    trainer = WeightedTrainer(
+                        pos_weights=pos_weights,
+                        use_focal_loss=config["focal_loss"],
+                        focal_gamma=config["focal_gamma"],
                         model=model,
                         args=training_args,
                         train_dataset=tokenized_train,
@@ -154,13 +196,18 @@ def train_transformers(data_path, config=None):
                     mlflow_active = active_run is not None
                     if mlflow_active:
                         safe_set_tag("phase", "experimentation")
-                        safe_log_param("model_id", model_id)
-                        safe_log_param("target_level", target)
-                        safe_log_param("learning_rate", lr)
-                        safe_log_param("batch_size", bs)
-                        safe_log_param("num_epochs", num_epochs)
-                        safe_log_param("max_len", max_len)
-                        safe_log_param("threshold_tuning", config["threshold_tuning"])
+                        safe_log_params({
+                            "model_id": model_id,
+                            "target_level": target,
+                            "learning_rate": lr,
+                            "batch_size": bs,
+                            "num_epochs": num_epochs,
+                            "max_len": max_len,
+                            "threshold_tuning": config["threshold_tuning"],
+                            "pos_weight": config["pos_weight"],
+                            "focal_loss": config["focal_loss"],
+                            "focal_gamma": config["focal_gamma"],
+                        })
 
                     trainer.train()
 
@@ -311,6 +358,10 @@ def train_transformers(data_path, config=None):
                 logger.error(f"Phase 2: Failed to load model for {model_name}/{target}: {e}")
                 continue
 
+            pos_weights = None
+            if config["pos_weight"]:
+                pos_weights = compute_pos_weights(y_train_val_labels)
+
             final_run_name = f"FINAL_{model_name}_{target}_lr{best['learning_rate']}_bs{best['batch_size']}"
 
             if ckpt.is_completed(final_run_name):
@@ -331,7 +382,10 @@ def train_transformers(data_path, config=None):
                 run_name=final_run_name,
             )
 
-            trainer = Trainer(
+            trainer = WeightedTrainer(
+                pos_weights=pos_weights,
+                use_focal_loss=config["focal_loss"],
+                focal_gamma=config["focal_gamma"],
                 model=model,
                 args=training_args,
                 train_dataset=tokenized_train_val,
@@ -351,6 +405,9 @@ def train_transformers(data_path, config=None):
                     "max_len": max_len,
                     "selected_by_val_f1_macro": best['val_f1_macro'],
                     "threshold_tuning": config["threshold_tuning"],
+                    "pos_weight": config["pos_weight"],
+                    "focal_loss": config["focal_loss"],
+                    "focal_gamma": config["focal_gamma"],
                 })
 
             logger.info(f"Phase 2: Fine-tuning {final_run_name} on train+val ({len(train_val_df)} samples)...")

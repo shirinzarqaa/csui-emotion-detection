@@ -19,6 +19,7 @@ from src.deep_learning.models import BiLSTM, TextCNN, FastTextDataset, BertDatas
 from src.utils.checkpoint import CheckpointManager
 from src.utils.mlflow_utils import safe_set_experiment, safe_start_run, safe_end_run, safe_log_param, safe_log_params, safe_log_metric, safe_log_metrics, safe_set_tag
 from src.utils.experiment_config import get_config
+from src.utils.focal_loss import FocalLoss
 
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '.fasttext_cache')
@@ -118,11 +119,9 @@ def fine_to_basic_predictions(y_pred_fine, basic_to_id, id_to_fine, fine_to_basi
 
 
 def compute_pos_weight(y_train):
-    num_pos = y_train.sum(axis=0)
-    num_neg = y_train.shape[0] - num_pos
-    num_neg = np.maximum(num_neg, 1)
-    num_pos = np.maximum(num_pos, 1)
-    pw = num_neg / num_pos
+    pos_counts = y_train.sum(axis=0)
+    neg_counts = y_train.shape[0] - pos_counts
+    pw = np.clip(neg_counts / np.clip(pos_counts, 1, None), 1.0, 10.0)
     return torch.tensor(pw, dtype=torch.float32).to(DEVICE)
 
 
@@ -186,9 +185,9 @@ def evaluate(model, loader, criterion, device, bert_mode=False):
 
 def _build_model(embedding_type, model_type, param_value, num_classes,
                   word_to_id=None, emb_matrix=None, embed_dim=None,
-                  bert_model=None, tokenizer=None):
+                  bert_model=None, tokenizer=None, num_layers=1):
     if model_type == 'bilstm':
-        classifier = BiLSTM(embed_dim, hidden_dim=param_value, num_classes=num_classes)
+        classifier = BiLSTM(embed_dim, hidden_dim=param_value, num_classes=num_classes, num_layers=num_layers)
     elif model_type == 'cnn':
         classifier = TextCNN(embed_dim, num_classes=num_classes, num_filters=param_value)
     else:
@@ -255,6 +254,9 @@ def train_and_evaluate_val(
     val_texts_raw=None,
     use_pos_weight=False,
     use_threshold_tuning=False,
+    use_focal_loss=False,
+    focal_gamma=2.0,
+    num_layers=1,
     analysis_dir="analysis",
     saved_models_dir="saved_models",
 ):
@@ -287,12 +289,19 @@ def train_and_evaluate_val(
         embed_dim=embed_dim,
         bert_model=bert_model if embedding_type == 'indobert' else None,
         tokenizer=tokenizer if embedding_type == 'indobert' else None,
+        num_layers=num_layers,
     )
 
+    pos_weight_tensor = None
     if use_pos_weight:
-        pos_weight = compute_pos_weight(y_train)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        logger.info(f"Using pos_weight: mean={pos_weight.mean():.2f}, max={pos_weight.max():.2f}")
+        pos_weight_tensor = compute_pos_weight(y_train)
+        logger.info(f"Using pos_weight: mean={pos_weight_tensor.mean():.2f}, max={pos_weight_tensor.max():.2f}")
+
+    if use_focal_loss:
+        criterion = FocalLoss(alpha=pos_weight_tensor, gamma=focal_gamma)
+        logger.info(f"Using FocalLoss: gamma={focal_gamma}, pos_weight={use_pos_weight}")
+    elif use_pos_weight:
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
     else:
         criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -433,6 +442,9 @@ def retrain_and_test(
     max_len=128,
     use_pos_weight=False,
     use_threshold_tuning=False,
+    use_focal_loss=False,
+    focal_gamma=2.0,
+    num_layers=1,
     val_texts=None,
     y_val=None,
     analysis_dir="analysis",
@@ -467,11 +479,17 @@ def retrain_and_test(
         embed_dim=embed_dim,
         bert_model=bert_model if embedding_type == 'indobert' else None,
         tokenizer=tokenizer if embedding_type == 'indobert' else None,
+        num_layers=num_layers,
     )
 
+    pos_weight_tensor = None
     if use_pos_weight:
-        pos_weight = compute_pos_weight(y_train_val)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        pos_weight_tensor = compute_pos_weight(y_train_val)
+
+    if use_focal_loss:
+        criterion = FocalLoss(alpha=pos_weight_tensor, gamma=focal_gamma)
+    elif use_pos_weight:
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
     else:
         criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -607,6 +625,9 @@ def train_dl(data_path, config=None):
         max_len=config["dl_max_len"],
         use_pos_weight=config["pos_weight"],
         use_threshold_tuning=config["threshold_tuning"],
+        use_focal_loss=config["focal_loss"],
+        focal_gamma=config["focal_gamma"],
+        num_layers=config["dl_bilstm_layers"],
         analysis_dir=analysis_dir,
         saved_models_dir=saved_models_dir,
     )
@@ -631,19 +652,22 @@ def train_dl(data_path, config=None):
                     "model_type": "bilstm",
                     "embedding_type": emb_type,
                     "embed_dim": 300 if emb_type == 'fasttext' else 768,
-                    "hidden_dim": 128,
+                    "hidden_dim": config["dl_bilstm_hidden"],
+                    "num_layers": config["dl_bilstm_layers"],
                     "target_level": target,
                     "batch_size": 32,
                     "learning_rate": 1e-3,
                     "pos_weight": config["pos_weight"],
                     "threshold_tuning": config["threshold_tuning"],
+                    "focal_loss": config["focal_loss"],
+                    "focal_gamma": config["focal_gamma"],
                     "max_len": config["dl_max_len"],
                 })
             try:
                 result = train_and_evaluate_val(
                     embedding_type=emb_type,
                     model_type='bilstm',
-                    param_value=128,
+                    param_value=config["dl_bilstm_hidden"],
                     target_level=target,
                     y_train=y_train,
                     y_val=y_val,
@@ -680,6 +704,8 @@ def train_dl(data_path, config=None):
                     "learning_rate": 1e-3,
                     "pos_weight": config["pos_weight"],
                     "threshold_tuning": config["threshold_tuning"],
+                    "focal_loss": config["focal_loss"],
+                    "focal_gamma": config["focal_gamma"],
                     "max_len": config["dl_max_len"],
                 })
             try:
@@ -750,16 +776,18 @@ def train_dl(data_path, config=None):
                 "target_level": target,
                 "best_epoch": best['best_epoch'],
                 "selected_by_val_f1_macro": best['val_f1_macro'],
-                "hidden_dim" if best['model_type'] == 'bilstm' else "num_filters": 128 if best['model_type'] == 'bilstm' else 100,
+                "hidden_dim" if best['model_type'] == 'bilstm' else "num_filters": config["dl_bilstm_hidden"] if best['model_type'] == 'bilstm' else 100,
                 "pos_weight": config["pos_weight"],
                 "threshold_tuning": config["threshold_tuning"],
+                "focal_loss": config["focal_loss"],
+                "focal_gamma": config["focal_gamma"],
             })
 
         try:
             retrain_and_test(
                 embedding_type=best['embedding_type'],
                 model_type=best['model_type'],
-                param_value=128 if best['model_type'] == 'bilstm' else 100,
+                param_value=config["dl_bilstm_hidden"] if best['model_type'] == 'bilstm' else 100,
                 target_level=target,
                 best_epoch=best['best_epoch'],
                 train_val_texts=train_val_texts,
@@ -777,6 +805,9 @@ def train_dl(data_path, config=None):
                 max_len=config["dl_max_len"],
                 use_pos_weight=config["pos_weight"],
                 use_threshold_tuning=config["threshold_tuning"],
+                use_focal_loss=config["focal_loss"],
+                focal_gamma=config["focal_gamma"],
+                num_layers=config["dl_bilstm_layers"],
                 val_texts=val_texts,
                 y_val=y_val_basic if is_basic else y_val_fine,
                 analysis_dir=analysis_dir,
