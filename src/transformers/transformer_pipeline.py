@@ -172,6 +172,7 @@ def train_transformers(data_path, config=None):
                         weight_decay=0.01,
                         eval_strategy="epoch",
                         save_strategy="epoch",
+                        save_total_limit=1,
                         load_best_model_at_end=True,
                         metric_for_best_model="eval_f1_macro",
                         logging_strategy="epoch",
