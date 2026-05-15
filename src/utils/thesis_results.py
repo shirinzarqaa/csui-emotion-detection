@@ -180,8 +180,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--mlflow_uri", type=str, default="http://localhost:8002")
-    parser.add_argument("--output", type=str, default="thesis_results")
-    parser.add_argument("--eval_dir", type=str, default="thesis_results")
+    parser.add_argument("--output", type=str, default="quantitative_result")
+    parser.add_argument("--eval_dir", type=str, default="quantitative_result")
     args = parser.parse_args()
 
     generate_thesis_tables(

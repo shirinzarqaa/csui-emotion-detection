@@ -541,7 +541,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="data/new_all.json")
     parser.add_argument("--experiment", type=str, default="exp1", choices=["exp1", "exp2"])
-    parser.add_argument("--output", type=str, default="thesis_results")
+    parser.add_argument("--output", type=str, default="quantitative_result")
     parser.add_argument("--mlflow_uri", type=str, default="http://localhost:8002")
     args = parser.parse_args()
 

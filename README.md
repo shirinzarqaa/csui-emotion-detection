@@ -280,19 +280,19 @@ Total: 5 models × 2 target levels × 3 LR × 1 BS = **30 Phase 1 runs** + **10 
 
 ---
 
-## Experiment Comparison & Thesis Results
+## Experiment Comparison & Quantitative Results
 
-### Thesis Results (Val + Test per run)
+### Quantitative Results (Val + Test per run)
 
 Evaluate **all Phase 1 models on test set** (models trained on train only, no retrain on train+val):
 
 ```bash
 # Evaluate all models on test set
-python -m src.utils.evaluate_test --experiment exp1 --output thesis_results
-python -m src.utils.evaluate_test --experiment exp2 --output thesis_results
+python -m src.utils.evaluate_test --experiment exp1 --output quantitative_result
+python -m src.utils.evaluate_test --experiment exp2 --output quantitative_result
 
-# Generate combined thesis tables
-python -m src.utils.thesis_results --output thesis_results --eval_dir thesis_results
+# Generate combined tables
+python -m src.utils.thesis_results --output quantitative_result --eval_dir quantitative_result
 ```
 
 **Output: 2 separate spreadsheets (exp1 + exp2), each with all runs and both val & test metrics:**
@@ -312,10 +312,10 @@ python -m src.utils.thesis_results --output thesis_results --eval_dir thesis_res
 | Test EMR | Exact Match Ratio (subset accuracy) on test set |
 
 **Files:**
-- `thesis_results/exp1_all_val_test.xlsx` — Experiment 1 (baseline), all runs with val + test
-- `thesis_results/exp2_all_val_test.xlsx` — Experiment 2 (optimized), all runs with val + test
-- `thesis_results/exp1_all_results.xlsx` + `exp2_all_results.xlsx` — Combined MLflow + evaluate_test results
-- `thesis_results/thesis_results.xlsx` — Master file with summary sheet
+- `quantitative_result/exp1_all_val_test.xlsx` — Experiment 1 (baseline), all runs with val + test
+- `quantitative_result/exp2_all_val_test.xlsx` — Experiment 2 (optimized), all runs with val + test
+- `quantitative_result/exp1_all_results.xlsx` + `exp2_all_results.xlsx` — Combined MLflow + evaluate_test results
+- `quantitative_result/thesis_results.xlsx` — Master file with summary sheet
 
 ### Master Comparison Spreadsheet
 
