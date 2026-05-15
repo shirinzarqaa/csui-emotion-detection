@@ -27,7 +27,7 @@ def generate_comparison(tracking_uri="http://localhost:8002", output_path="exper
                 "phase": run.get("tags.phase", ""),
             }
 
-            for col in run.columns:
+            for col in runs.columns:
                 if col.startswith("params."):
                     row[col.replace("params.", "param_")] = run[col]
                 elif col.startswith("metrics."):
