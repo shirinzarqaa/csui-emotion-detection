@@ -225,10 +225,6 @@ checkpoints/
 # Training logs
 logs/
 
-# Runtime analysis (overwritten each experiment)
-analysis/
-analysis_exp2/
-
 # Saved transformer models (too large for git)
 saved_models/
 saved_models_exp2/
