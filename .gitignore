@@ -228,3 +228,6 @@ logs/
 # Saved transformer models (too large for git)
 saved_models/
 saved_models_exp2/
+
+# Large per-sample CSV (108MB, exceeds GitHub 100MB limit)
+experiment_comparison/per_sample_detail.csv
