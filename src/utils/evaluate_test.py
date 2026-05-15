@@ -495,22 +495,34 @@ def evaluate_all_test(data_path, experiment, output_dir, mlflow_uri):
 
     df = pd.DataFrame(all_results)
 
-    metric_cols_val = [c for c in df.columns if c.startswith("val_")]
-    metric_cols_test = [c for c in df.columns if c.startswith("test_")]
+    output_cols = [
+        "run_name",
+        "val_f1_micro", "val_f1_macro", "val_f1_weighted", "val_hamming_loss", "val_subset_accuracy",
+        "test_f1_micro", "test_f1_macro", "test_f1_weighted", "test_hamming_loss", "test_subset_accuracy",
+    ]
+    nice_names = {
+        "run_name": "Percobaan",
+        "val_f1_micro": "Val F1-Micro",
+        "val_f1_macro": "Val F1-Macro",
+        "val_f1_weighted": "Val F1-Weighted",
+        "val_hamming_loss": "Val Hamming Loss",
+        "val_subset_accuracy": "Val EMR",
+        "test_f1_micro": "Test F1-Micro",
+        "test_f1_macro": "Test F1-Macro",
+        "test_f1_weighted": "Test F1-Weighted",
+        "test_hamming_loss": "Test Hamming Loss",
+        "test_subset_accuracy": "Test EMR",
+    }
 
-    rename_val = {c: c.replace("val_", "Val ") for c in metric_cols_val}
-    rename_test = {c: c.replace("test_", "Test ") for c in metric_cols_test}
-
-    display_cols = ["pipeline", "run_name"] + list(rename_val.values()) + list(rename_test.values())
-    available = [c for c in display_cols if c in df.columns]
-
-    df_display = df.rename(columns={**rename_val, **rename_test})
+    available = [c for c in output_cols if c in df.columns]
+    df_display = df[available].copy()
+    df_display = df_display.rename(columns=nice_names)
 
     for c in df_display.columns:
-        if c.startswith("Val ") or c.startswith("Test "):
+        if c != "Percobaan":
             df_display[c] = df_display[c].round(4)
 
-    df_display = df_display[available].sort_values(["pipeline", "Val f1_macro", "Test f1_macro"], ascending=[True, False, False])
+    df_display = df_display.sort_values("Percobaan")
 
     df_display.to_csv(f"{output_dir}/{experiment}_all_val_test.csv", index=False)
     df_display.to_excel(f"{output_dir}/{experiment}_all_val_test.xlsx", index=False, engine='openpyxl')

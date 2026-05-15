@@ -280,15 +280,50 @@ Total: 5 models × 2 target levels × 3 LR × 1 BS = **30 Phase 1 runs** + **10 
 
 ---
 
-## Experiment Comparison
+## Experiment Comparison & Thesis Results
 
-After both experiments complete, generate a master comparison spreadsheet:
+### Thesis Results (Val + Test per run)
+
+Evaluate **all Phase 1 models on test set** (models trained on train only, no retrain on train+val):
+
+```bash
+# Evaluate all models on test set
+python -m src.utils.evaluate_test --experiment exp1 --output thesis_results
+python -m src.utils.evaluate_test --experiment exp2 --output thesis_results
+
+# Generate combined thesis tables
+python -m src.utils.thesis_results --output thesis_results --eval_dir thesis_results
+```
+
+**Output: 2 separate spreadsheets (exp1 + exp2), each with all runs and both val & test metrics:**
+
+| Column | Description |
+|---|---|
+| Percobaan | Run name (e.g. `BR_Basic_Unigram_BoW_LR`, `bilstm_fasttext_basic`, `IndoBERT_basic_lr3e-05_bs32`) |
+| Val F1-Micro | F1-micro on validation set |
+| Val F1-Macro | F1-macro on validation set |
+| Val F1-Weighted | F1-weighted on validation set |
+| Val Hamming Loss | Hamming loss on validation set |
+| Val EMR | Exact Match Ratio (subset accuracy) on validation set |
+| Test F1-Micro | F1-micro on test set |
+| Test F1-Macro | F1-macro on test set |
+| Test F1-Weighted | F1-weighted on test set |
+| Test Hamming Loss | Hamming loss on test set |
+| Test EMR | Exact Match Ratio (subset accuracy) on test set |
+
+**Files:**
+- `thesis_results/exp1_all_val_test.xlsx` — Experiment 1 (baseline), all runs with val + test
+- `thesis_results/exp2_all_val_test.xlsx` — Experiment 2 (optimized), all runs with val + test
+- `thesis_results/exp1_all_results.xlsx` + `exp2_all_results.xlsx` — Combined MLflow + evaluate_test results
+- `thesis_results/thesis_results.xlsx` — Master file with summary sheet
+
+### Master Comparison Spreadsheet
 
 ```bash
 python -m src.utils.generate_comparison --output experiment_comparison
 ```
 
-**Output** (9+ sheets in XLSX + per-sample CSV):
+**Output** (9+ sheets in XLSX + CSVs):
 
 | Sheet | Contents |
 |---|---|
@@ -296,11 +331,9 @@ python -m src.utils.generate_comparison --output experiment_comparison
 | exp2_val_summary | All Phase 1 val metrics for exp2 |
 | exp1_test_summary | All Phase 2 test metrics for exp1 |
 | exp2_test_summary | All Phase 2 test metrics for exp2 |
-| comparison_val | Side-by-side val F1 delta (exp2 - exp1) |
-| comparison_test | Side-by-side test F1 delta (exp2 - exp1) |
-| thresholds_exp2 | Per-label optimized thresholds for all exp2 runs |
-| per_label_f1_exp1 | Per-label F1 for all exp1 runs |
-| per_label_f1_exp2 | Per-label F1 for all exp2 runs |
+| comparison | Side-by-side val + test F1 delta (exp2 - exp1) |
+| thresholds | Per-label optimized thresholds for all exp2 runs |
+| per_label_f1 | Per-label F1 for all runs |
 | per_label_comparison | Per-label F1 delta (exp2 - exp1) |
 | emr_per_run | Exact Match Ratio per run |
 | f1_per_basic_group | F1 grouped by basic emotion category |
