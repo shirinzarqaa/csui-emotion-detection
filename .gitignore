@@ -229,9 +229,6 @@ logs/
 analysis/
 analysis_exp2/
 
-# Experiment comparison output (large CSVs, regenerate anytime)
-experiment_comparison/
-
 # Saved transformer models (too large for git)
 saved_models/
 saved_models_exp2/
