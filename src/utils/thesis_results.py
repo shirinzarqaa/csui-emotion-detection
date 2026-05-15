@@ -20,7 +20,6 @@ def generate_thesis_tables(tracking_uri="http://localhost:8002", output_path="th
         for _, run in runs.iterrows():
             is_exp2 = "_exp2" in exp_name
             exp_tag = "exp2" if is_exp2 else "exp1"
-            clean_exp_name = exp_name.replace("_exp2", "")
 
             if "Traditional" in exp_name:
                 pipeline = "Traditional ML"
@@ -32,31 +31,30 @@ def generate_thesis_tables(tracking_uri="http://localhost:8002", output_path="th
                 pipeline = "Other"
 
             is_test = "Final_Test" in exp_name
+            phase = "Phase 2 (Test)" if is_test else "Phase 1 (Val)"
 
             row = {
                 "experiment": exp_tag,
                 "pipeline": pipeline,
-                "phase": "Phase 2 (Test)" if is_test else "Phase 1 (Val)",
+                "phase": phase,
                 "run_name": run.get("tags.mlflow.runName", ""),
             }
 
-            metric_keys = [
-                ("F1-Macro", ["val_f1_macro", "test_f1_macro"]),
-                ("F1-Micro", ["val_f1_micro", "test_f1_micro"]),
-                ("F1-Weighted", ["val_f1_weighted", "test_f1_weighted"]),
-                ("Hamming Loss", ["val_hamming_loss", "test_hamming_loss"]),
-                ("Exact Match Ratio", ["val_subset_accuracy", "test_subset_accuracy"]),
-            ]
+            metric_map = {
+                "Val F1-Macro": "metrics.val_f1_macro",
+                "Val F1-Micro": "metrics.val_f1_micro",
+                "Val F1-Weighted": "metrics.val_f1_weighted",
+                "Val Hamming Loss": "metrics.val_hamming_loss",
+                "Val Exact Match Ratio": "metrics.val_subset_accuracy",
+                "Test F1-Macro": "metrics.test_f1_macro",
+                "Test F1-Micro": "metrics.test_f1_micro",
+                "Test F1-Weighted": "metrics.test_f1_weighted",
+                "Test Hamming Loss": "metrics.test_hamming_loss",
+                "Test Exact Match Ratio": "metrics.test_subset_accuracy",
+            }
 
-            for nice_name, keys in metric_keys:
-                val_key = f"metrics.{keys[0]}"
-                test_key = f"metrics.{keys[1]}"
-
-                if is_test:
-                    val = run.get(test_key, None)
-                else:
-                    val = run.get(val_key, None)
-
+            for nice_name, mlflow_key in metric_map.items():
+                val = run.get(mlflow_key, None)
                 row[nice_name] = round(val, 4) if val is not None else None
 
             param_cols = [c for c in runs.columns if c.startswith("params.")]
@@ -74,7 +72,8 @@ def generate_thesis_tables(tracking_uri="http://localhost:8002", output_path="th
     df = pd.DataFrame(all_rows)
     os.makedirs(output_path, exist_ok=True)
 
-    metric_cols = ["F1-Macro", "F1-Micro", "F1-Weighted", "Hamming Loss", "Exact Match Ratio"]
+    val_metric_cols = ["Val F1-Macro", "Val F1-Micro", "Val F1-Weighted", "Val Hamming Loss", "Val Exact Match Ratio"]
+    test_metric_cols = ["Test F1-Macro", "Test F1-Micro", "Test F1-Weighted", "Test Hamming Loss", "Test Exact Match Ratio"]
 
     for exp_tag in ["exp1", "exp2"]:
         exp_df = df[df["experiment"] == exp_tag].copy()
@@ -83,12 +82,15 @@ def generate_thesis_tables(tracking_uri="http://localhost:8002", output_path="th
             logger.warning(f"No runs for {exp_tag}")
             continue
 
-        display_cols = ["pipeline", "phase", "run_name"] + metric_cols
+        display_cols = ["pipeline", "phase", "run_name"] + val_metric_cols + test_metric_cols
         param_cols_found = [c for c in exp_df.columns if c.startswith("param_") and exp_df[c].notna().any()]
         display_cols += param_cols_found
         available = [c for c in display_cols if c in exp_df.columns]
 
-        exp_df = exp_df[available].sort_values(["pipeline", "phase", "F1-Macro"], ascending=[True, True, False])
+        exp_df = exp_df[available].sort_values(
+            ["pipeline", "phase", "Val F1-Macro", "Test F1-Macro"],
+            ascending=[True, True, False, False]
+        )
 
         exp_df.to_csv(f"{output_path}/{exp_tag}_all_results.csv", index=False)
         exp_df.to_excel(f"{output_path}/{exp_tag}_all_results.xlsx", index=False, engine='openpyxl')
@@ -98,13 +100,53 @@ def generate_thesis_tables(tracking_uri="http://localhost:8002", output_path="th
         for exp_tag in ["exp1", "exp2"]:
             csv_path = f"{output_path}/{exp_tag}_all_results.csv"
             if os.path.exists(csv_path):
-                pd.read_csv(csv_path).to_excel(writer, sheet_name=exp_tag, index=False)
+                sheet_df = pd.read_csv(csv_path)
+                sheet_df.to_excel(writer, sheet_name=exp_tag, index=False)
+
+    summary_rows = []
+    for exp_tag in ["exp1", "exp2"]:
+        for pipeline in ["Traditional ML", "Deep Learning", "Transformers"]:
+            subset = df[(df["experiment"] == exp_tag) & (df["pipeline"] == pipeline)]
+            if subset.empty:
+                continue
+
+            p1 = subset[subset["phase"] == "Phase 1 (Val)"]
+            p2 = subset[subset["phase"] == "Phase 2 (Test)"]
+
+            best_val_f1 = p1["Val F1-Macro"].max() if not p1.empty else None
+            best_test_f1 = p2["Test F1-Macro"].max() if not p2.empty else None
+            mean_val_f1 = p1["Val F1-Macro"].mean() if not p1.empty else None
+            mean_test_f1 = p2["Test F1-Macro"].mean() if not p2.empty else None
+
+            summary_rows.append({
+                "experiment": exp_tag,
+                "pipeline": pipeline,
+                "num_val_runs": len(p1),
+                "num_test_runs": len(p2),
+                "best_val_f1_macro": round(best_val_f1, 4) if best_val_f1 is not None else None,
+                "mean_val_f1_macro": round(mean_val_f1, 4) if mean_val_f1 is not None else None,
+                "best_test_f1_macro": round(best_test_f1, 4) if best_test_f1 is not None else None,
+                "mean_test_f1_macro": round(mean_test_f1, 4) if mean_test_f1 is not None else None,
+            })
+
+    if summary_rows:
+        summary_df = pd.DataFrame(summary_rows)
+        summary_df.to_csv(f"{output_path}/summary.csv", index=False)
+        summary_df.to_excel(f"{output_path}/summary.xlsx", index=False, engine='openpyxl')
+
+        with pd.ExcelWriter(f"{output_path}/thesis_results.xlsx", engine='openpyxl') as writer:
+            for exp_tag in ["exp1", "exp2"]:
+                csv_path = f"{output_path}/{exp_tag}_all_results.csv"
+                if os.path.exists(csv_path):
+                    pd.read_csv(csv_path).to_excel(writer, sheet_name=exp_tag, index=False)
+            summary_df.to_excel(writer, sheet_name="summary", index=False)
 
     logger.info(f"\n{'='*60}")
     logger.info(f"Thesis tables saved to: {output_path}/")
-    logger.info(f"  - exp1_all_results.csv/.xlsx (all Phase 1 + Phase 2 runs)")
-    logger.info(f"  - exp2_all_results.csv/.xlsx (all Phase 1 + Phase 2 runs)")
-    logger.info(f"  - thesis_results.xlsx (both in one file)")
+    logger.info(f"  - exp1_all_results.csv/.xlsx")
+    logger.info(f"  - exp2_all_results.csv/.xlsx")
+    logger.info(f"  - summary.csv/.xlsx (best & mean per pipeline)")
+    logger.info(f"  - thesis_results.xlsx (all in one file, 3 sheets)")
     logger.info(f"{'='*60}")
 
 
