@@ -6,7 +6,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-import mlflow
 from loguru import logger
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
@@ -21,7 +20,6 @@ from src.data_loader import (
 )
 from src.utils.metrics import compute_all_metrics_binary, save_manual_analysis_binary
 from src.utils.threshold_tuning import optimize_thresholds, apply_thresholds
-from src.utils.mlflow_utils import safe_set_experiment, safe_start_run, safe_end_run, safe_log_param, safe_log_params, safe_log_metric, safe_log_metrics, safe_set_tag
 from src.utils.experiment_config import get_config
 from src.deep_learning.models import BiLSTM, TextCNN, FastTextDataset, BertDataset
 from src.deep_learning.dl_pipeline import build_fasttext_embedding, build_indobert_embedder, predict_probs
