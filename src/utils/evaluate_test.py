@@ -133,6 +133,7 @@ def evaluate_traditional_test(data_path, config, output_dir):
     ) = prepare_data(data_path, preprocessing_mode=prep_mode)
 
     train_texts = train_df['preprocessed_text'].tolist()
+    val_texts = val_df['preprocessed_text'].tolist()
     test_texts = test_df['preprocessed_text'].tolist()
     test_texts_raw = test_df['text'].tolist()
 
@@ -166,7 +167,7 @@ def evaluate_traditional_test(data_path, config, output_dir):
 
                 vectorizer = _make_vectorizer(feat_conf)
                 X_train = vectorizer.fit_transform(train_texts)
-                X_val = vectorizer.transform(val_texts if hasattr(val_df, 'preprocessed_text') else [])
+                X_val = vectorizer.transform(val_texts)
                 X_test = vectorizer.transform(test_texts)
 
                 base_model_cls = {"LR": LogisticRegression, "NB": MultinomialNB, "SVM": SVC}[model_type]
