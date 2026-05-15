@@ -1,6 +1,6 @@
 # Multi-Label Hierarchical Emotion Classification for Indonesian Text
 
-An end-to-end pipeline for hierarchical multi-label emotion classification of Indonesian social media text. Supports three approaches — **Traditional ML**, **Deep Learning**, and **Transformers** — with full experiment tracking via **MLflow**.
+An end-to-end pipeline for hierarchical multi-label emotion classification of Indonesian social media text. Supports three approaches — **Traditional ML**, **Deep Learning**, and **Transformers** — across **two experiments** (baseline vs. optimized), with full experiment tracking via **MLflow** and comprehensive comparison analysis.
 
 ---
 
@@ -9,24 +9,34 @@ An end-to-end pipeline for hierarchical multi-label emotion classification of In
 ```
 csui-emotion-detection/
 ├── data/
-│   └── new_all.json          # Primary dataset (32,598 samples)
+│   └── new_all.json                    # Primary dataset (32,598 samples)
 ├── src/
-│   ├── data_loader.py        # Multi-label parsing: new_label_basic (6 labels) → new_label_fine_grained (44 labels)
+│   ├── data_loader.py                  # Multi-label parsing: basic (6) → fine-grained (44)
 │   ├── utils/
-│   │   ├── metrics.py        # Evaluation: f1-macro/micro/weighted, hamming loss, subset accuracy, per-label F1
-│   │   ├── preprocessing.py  # 3 preprocessing modes: traditional, DL, transformers
-│   │   └── inference_analysis.py  # Deep per-sample inference analysis (Phase 2 only)
+│   │   ├── metrics.py                  # 5 core metrics + per-label precision/recall/F1/support + per-sample hamming/exact-match
+│   │   ├── preprocessing.py            # 3 preprocessing modes: traditional, DL, transformers
+│   │   ├── inference_analysis.py       # Deep per-sample inference analysis (Phase 2 only)
+│   │   ├── experiment_config.py        # Central config: exp1 (baseline) vs exp2 (optimized)
+│   │   ├── mlflow_utils.py             # Safe MLflow wrapper: 5 retries, 10s incremental delay, fallback
+│   │   ├── threshold_tuning.py         # Per-label threshold optimization (0.1–0.9, step 0.05)
+│   │   ├── focal_loss.py               # FocalLoss(nn.Module): alpha (pos_weight) + gamma=2.0
+│   │   ├── generate_comparison.py      # Master comparison spreadsheet (9+ sheets: exp1 vs exp2)
+│   │   └── checkpoint.py               # CheckpointManager: resume/skip completed runs
 │   ├── traditional/
-│   │   └── traditional_pipeline.py  # 54 runs: BR/LP × Unigram/Bigram/Trigram × BoW/TF-IDF × LR/NB/SVM
+│   │   └── traditional_pipeline.py     # 57 runs: BR/LP × features × classifiers + threshold tuning (exp2)
 │   ├── deep_learning/
-│   │   ├── dl_pipeline.py    # 8 runs: FastText/IndoBERT × BiLSTM/CNN × basic/fine target levels
-│   │   └── models.py         # BiLSTM, TextCNN, FastTextDataset, BertDataset
+│   │   ├── dl_pipeline.py              # 10 runs: FastText/IndoBERT × BiLSTM/CNN × basic/fine + FocalLoss (exp2)
+│   │   └── models.py                   # BiLSTM, TextCNN, FastTextDataset, BertDataset
 │   └── transformers/
-│       └── transformer_pipeline.py  # 80 HPO runs: 5 models × 2 targets × 4 LR × 2 batch sizes
-├── analysis/                 # CSV error analysis files after each run
-├── run_pipeline.py           # Orchestrator: --run traditional|dl|transformers|all
+│       └── transformer_pipeline.py     # 40 HPO runs: 5 models × 2 targets × 3 LR × 1 BS + WeightedTrainer (exp2)
+├── analysis/                           # Exp1: CSV/XLSX error analysis (val + test)
+├── analysis_exp2/                      # Exp2: CSV/XLSX error analysis (val + test)
+├── saved_models/                        # Exp1: saved model artifacts per run
+├── saved_models_exp2/                   # Exp2: saved model artifacts per run
+├── checkpoints/                         # *_checkpoint.json (exp1) + *_checkpoint_exp2.json (exp2)
+├── run_pipeline.py                      # Orchestrator: --run traditional|dl|transformers|all --experiment exp1|exp2
 ├── requirements.txt
-├── docker-compose.yml        # Parallel Docker: 3 containers + 1 MLflow server
+├── docker-compose.yml                   # Parallel Docker: 3 containers + 1 MLflow server
 └── README.md
 ```
 
@@ -43,13 +53,38 @@ csui-emotion-detection/
 | **sadness** | broken-heart, compassion, embarrassment, feeling moved, grief, hopelessness, pensiveness, pity, remorse, suffering |
 | **surprise** | confusion, realization, surprise |
 
-> **Note — "no emotion" removed**: The original dataset includes a "no emotion" label, but it has **0 training examples** (only 4 in val, 6 in test). Since no model can learn a class with zero training examples, it has been removed from the label set. Samples previously labeled only "no emotion" are now mapped to the closest available label during parsing.
+> **Note — "no emotion" removed**: The original dataset includes a "no emotion" label, but it has **0 training examples** (only 4 in val, 6 in test). Since no model can learn a class with zero training examples, it has been removed from the label set.
+
+---
+
+## Two Experiments: Baseline vs. Optimized
+
+| | Exp1 (Baseline) | Exp2 (Optimized) |
+|---|---|---|
+| **Purpose** | Standard training, default settings | Address class imbalance + improve fine-grained F1 |
+| **Epochs** | 3 (transformers/DL) | 10 (DL), 5 (transformers) with early stopping |
+| **Max length** | 128 | 256 |
+| **Loss function** | BCEWithLogitsLoss | FocalLoss (gamma=2.0) + pos_weight (clamped [1.0, 10.0]) |
+| **Threshold** | 0.5 (default) | Per-label optimized (0.1–0.9, step 0.05) |
+| **BiLSTM capacity** | hidden=128, layers=1 | hidden=256, layers=2 |
+| **MLflow experiment** | `Traditional_ML_MultiLabel`, etc. | `Traditional_ML_MultiLabel_exp2`, etc. |
+| **Checkpoints** | `checkpoints/*_checkpoint.json` | `checkpoints/*_checkpoint_exp2.json` |
+| **Analysis output** | `analysis/` | `analysis_exp2/` |
+| **Saved models** | `saved_models/` | `saved_models_exp2/` |
+
+### Exp2 Key Optimizations
+
+1. **Focal Loss** (`src/utils/focal_loss.py`): Down-weights easy examples, focuses training on hard/rare labels. Alpha from pos_weight + gamma=2.0.
+2. **Pos Weight** (`compute_pos_weights()`): Inversely proportional to class frequency, clamped to [1.0, 10.0] to prevent explosion. Applied in loss function for all three pipelines.
+3. **Per-Label Threshold Tuning** (`src/utils/threshold_tuning.py`): Sweeps 0.1–0.9 (step 0.05) per label, picks threshold maximizing F1 for that label. Replaces the default 0.5 sigmoid cutoff.
+4. **WeightedTrainer** (transformers): Custom HuggingFace Trainer subclass overriding `compute_loss()` to inject pos_weight + FocalLoss.
+5. **Larger BiLSTM**: hidden_dim=256, num_layers=2 for fine-grained (44 labels) capacity.
 
 ---
 
 ## Data Format
 
-Place `new_all.json` in the `data/` folder (committed to repo, derived from `new_all.xlsx`):
+Place `new_all.json` in the `data/` folder:
 
 ```json
 [
@@ -84,11 +119,9 @@ Pipeline reads `new_label_basic` / `new_label_fine_grained` automatically via `s
 | Remove non-alphabetic tokens | ✓ | ✓ | ✓ |
 | Clean extra spaces | ✓ | ✓ | ✓ |
 
-Pipeline uses **saka-nlp** (v0.1.9), **emoji** (v2.15+), and **emot** (v3.1) — see [Stack Migration section](#stack-migration-2023--2026) below for rationale.
+Pipeline uses **saka-nlp** (v0.1.9), **emoji** (v2.15+), and **emot** (v3.1).
 
 ### URL & Username Patterns in Data
-
-The dataset uses **placeholder tokens** rather than raw URLs/usernames:
 
 | Pattern | Occurrences (out of 32,598) | Example |
 |---|---|---|
@@ -98,13 +131,11 @@ The dataset uses **placeholder tokens** rather than raw URLs/usernames:
 | `https?://` | 0 rows | — |
 | `#hashtag` | 153 rows | `#IndoPride emang sih` |
 
-Both placeholder format (`[URL]`, `[USERNAME]`) and regex format (`https?://`, `@user`) are handled.
-
 ---
 
 ## Evaluation Metrics
 
-Each pipeline computes **5 core metrics** + per-label F1:
+Each pipeline computes **5 core metrics** + per-label metrics:
 
 | Metric | Description |
 |---|---|
@@ -114,7 +145,7 @@ Each pipeline computes **5 core metrics** + per-label F1:
 | **F1-Micro** | Global F1 (aggregates all labels) |
 | **F1-Weighted** | Per-label F1 weighted by label frequency |
 
-Per-label F1 scores are also reported for all 44 fine-grained labels. All metrics are logged to MLflow.
+Additionally: per-label **precision**, **recall**, **F1**, **support** for all labels, plus per-sample **hamming loss** and **exact match** flag. All metrics are logged to MLflow.
 
 ---
 
@@ -143,24 +174,20 @@ To prevent **test set leakage**, all pipelines follow a strict two-phase protoco
 | Error analysis CSV+XLSX | Test | `analysis/final_test_analysis_*.csv` + `.xlsx` |
 | Log to MLflow | Test metrics | Archive final result |
 
-**Why?** If you evaluate on test every run, you subconsciously tune to test performance. Val = compass during development. Test = final exam taken once.
-
 ### MLflow Organization
 
-| Experiment | Phase | Contents |
-|---|---|---|
-| `Traditional_ML_MultiLabel` | Phase 1 | 54 runs with val metrics |
-| `Traditional_ML_Final_Test` | Phase 2 | 3 final runs with test metrics |
-| `Deep_Learning_MultiLabel` | Phase 1 | 8 runs with val metrics |
-| `Deep_Learning_Final_Test` | Phase 2 | 2 final runs with test metrics |
-| `Transformer_MultiLabel` | Phase 1 | 80 runs with val metrics |
-| `Transformer_Final_Test` | Phase 2 | 10 final runs with test metrics |
-
-Each run is tagged with `phase: experimentation` or `phase: final_test`.
+| Experiment | Phase | Exp1 Name | Exp2 Name | Runs |
+|---|---|---|---|---|
+| Traditional ML | Phase 1 | `Traditional_ML_MultiLabel` | `Traditional_ML_MultiLabel_exp2` | 54 |
+| Traditional ML | Phase 2 | `Traditional_ML_Final_Test` | `Traditional_ML_Final_Test_exp2` | 3 |
+| Deep Learning | Phase 1 | `Deep_Learning_MultiLabel` | `Deep_Learning_MultiLabel_exp2` | 8 |
+| Deep Learning | Phase 2 | `Deep_Learning_Final_Test` | `Deep_Learning_Final_Test_exp2` | 2 |
+| Transformers | Phase 1 | `Transformer_MultiLabel` | `Transformer_MultiLabel_exp2` | 30 |
+| Transformers | Phase 2 | `Transformer_Final_Test` | `Transformer_Final_Test_exp2` | 10 |
 
 ---
 
-## Pipeline: Traditional Machine Learning (54 runs)
+## Pipeline: Traditional Machine Learning (57 runs total)
 
 ### Scenarios
 
@@ -181,29 +208,30 @@ Each run is tagged with `phase: experimentation` or `phase: final_test`.
 | Trigram → Bag of Words | |
 | Trigram → TF-IDF | |
 
-Total: 3 scenarios × 6 features × 3 models = **54 runs**. Models logged to MLflow via `mlflow.sklearn.log_model()`.
+Total: 3 scenarios × 6 features × 3 models = **54 Phase 1 runs** + **3 Phase 2 runs** = **57 total**.
+
+### Exp2 additions
+- **Threshold tuning** for BR models (LR/SVM via `predict_proba`): sweeps 0.1–0.9 per label, replaces default 0.5.
 
 ---
 
-## Pipeline: Deep Learning (8 runs)
+## Pipeline: Deep Learning (10 runs total)
 
 Each model is trained **independently on both target levels** — basic labels (6 classes) and fine-grained labels (44 classes).
 
 ### Embedding
 
-Two embedding approaches using best-practice fixed hyperparameters:
-
 | Embedding | Dimension | Source | Rationale |
 |---|---|---|---|
-| **FastText** (cc.id.300.vec) | 300-dim | Facebook pre-trained Indonesian vectors | Subword info (char n-grams) handles OOV and morphologically rich languages (Conneau et al., 2020). Lightweight, not contextual. |
-| **IndoBERT** (indolem/indobert-base-uncased) | 768-dim | IndoLEM pre-trained (Koto et al., 2020) | Contextual embeddings capturing sentence-level semantics. Frozen for feature extraction. |
+| **FastText** (cc.id.300.vec) | 300-dim | Facebook pre-trained Indonesian vectors | Subword info handles OOV and morphologically rich languages. Lightweight, not contextual. |
+| **IndoBERT** (indolem/indobert-base-uncased) | 768-dim | IndoLEM pre-trained | Contextual embeddings. Frozen for feature extraction. |
 
-### Architecture (Fixed Best-Practice Hyperparameters)
+### Architecture
 
-| Model | Configuration | Reference |
+| Model | Exp1 Config | Exp2 Config |
 |---|---|---|
-| **Bi-LSTM** | hidden_dim=128, bidirectional, dropout=0.3 | Graves & Schmidhuber (2005) |
-| **CNN** | num_filters=100, filter_sizes=[3,4,5], dropout=0.3 | Kim (2014); Baihaqi et al. (2023) for Indonesian |
+| **Bi-LSTM** | hidden_dim=128, 1 layer, dropout=0.3 | hidden_dim=256, 2 layers, dropout=0.3 |
+| **CNN** | num_filters=100, filter_sizes=[3,4,5], dropout=0.3 | (same) |
 
 ### Target Levels
 
@@ -212,11 +240,17 @@ Two embedding approaches using best-practice fixed hyperparameters:
 | **basic** | 6 | Direct 6-label prediction |
 | **fine** | 44 | Direct 44-label prediction; basic derived via taxonomy mapping |
 
-Total: 2 embeddings × 2 models × 2 target levels = **8 runs**. Training: BCEWithLogitsLoss, Adam(lr=1e-3), early stopping (patience=3). Models logged to MLflow via `mlflow.pytorch.log_model()`.
+Total: 2 embeddings × 2 models × 2 target levels = **8 Phase 1 runs** + **2 Phase 2 runs** = **10 total**.
+
+### Exp2 additions
+- **FocalLoss** (gamma=2.0) replaces BCEWithLogitsLoss
+- **pos_weight** computed from training data, clamped [1.0, 10.0]
+- **Threshold tuning** per label after prediction
+- **Epochs**: 10 (up from 3) with early stopping (patience=3)
 
 ---
 
-## Pipeline: Transformers (80 HPO runs)
+## Pipeline: Transformers (40 HPO runs total)
 
 Each model is fine-tuned **independently on both target levels** — basic labels (6 classes) and fine-grained labels (44 classes).
 
@@ -232,11 +266,44 @@ Each model is fine-tuned **independently on both target levels** — basic label
 
 ### HPO Grid (per target level per model)
 
-- Learning rates: `[2e-5, 3e-5, 4e-5, 5e-5]`
-- Batch sizes: `[16, 32]`
-- Training: 3 epochs, weight_decay=0.01, `problem_type="multi_label_classification"`
+- Learning rates: `[2e-5, 3e-5, 5e-5]`
+- Batch sizes: `[32]`
+- Training: 5 epochs (exp2) / 3 epochs (exp1), weight_decay=0.01, early stopping (patience=3)
 
-Total: 5 models × 2 target levels × 4 LR × 2 BS = **80 runs**. Checkpoints auto-logged to MLflow via `report_to="mlflow"`.
+Total: 5 models × 2 target levels × 3 LR × 1 BS = **30 Phase 1 runs** + **10 Phase 2 runs** = **40 total**.
+
+### Exp2 additions
+- **WeightedTrainer**: Custom Trainer subclass with FocalLoss + pos_weight in `compute_loss()`
+- **pos_weight** computed from training data, clamped [1.0, 10.0]
+- **Threshold tuning** per label after prediction
+- **save_total_limit=1**: prevents disk overflow from accumulating checkpoints
+
+---
+
+## Experiment Comparison
+
+After both experiments complete, generate a master comparison spreadsheet:
+
+```bash
+python -m src.utils.generate_comparison --output experiment_comparison
+```
+
+**Output** (9+ sheets in XLSX + per-sample CSV):
+
+| Sheet | Contents |
+|---|---|
+| exp1_val_summary | All Phase 1 val metrics for exp1 |
+| exp2_val_summary | All Phase 1 val metrics for exp2 |
+| exp1_test_summary | All Phase 2 test metrics for exp1 |
+| exp2_test_summary | All Phase 2 test metrics for exp2 |
+| comparison_val | Side-by-side val F1 delta (exp2 - exp1) |
+| comparison_test | Side-by-side test F1 delta (exp2 - exp1) |
+| thresholds_exp2 | Per-label optimized thresholds for all exp2 runs |
+| per_label_f1_exp1 | Per-label F1 for all exp1 runs |
+| per_label_f1_exp2 | Per-label F1 for all exp2 runs |
+| per_label_comparison | Per-label F1 delta (exp2 - exp1) |
+| emr_per_run | Exact Match Ratio per run |
+| f1_per_basic_group | F1 grouped by basic emotion category |
 
 ---
 
@@ -245,7 +312,6 @@ Total: 5 models × 2 target levels × 4 LR × 2 BS = **80 runs**. Checkpoints au
 ### Docker (Parallel — All Pipelines Simultaneously)
 
 ```bash
-# Launch MLflow server + 3 pipeline containers in parallel:
 docker-compose up --build
 
 # Monitoring:
@@ -253,42 +319,39 @@ docker-compose up --build
 # - Container logs: docker-compose logs -f
 ```
 
-This starts **3 independent containers** running in parallel:
+| Container | Pipeline | Exp1 Phase 1 | Exp2 Phase 1 | Total |
+|---|---|---|---|---|
+| `pipeline-traditional` | Traditional ML | 54 | 54 | 108 |
+| `pipeline-dl` | Deep Learning | 8 | 8 | 16 |
+| `pipeline-transformers` | Transformers | 30 | 30 | 60 |
 
-| Container | Pipeline | MLflow Experiment | Runs |
-|---|---|---|---|
-| `pipeline-traditional` | Traditional ML | `Traditional_ML_MultiLabel` | 54 |
-| `pipeline-dl` | Deep Learning | `Deep_Learning_MultiLabel` | 8 |
-| `pipeline-transformers` | Transformers | `Transformer_MultiLabel` | 80 |
-
-All write to the same MLflow server. Total: **142 concurrent runs**.
+Grand total (Phase 1 + Phase 2, both experiments): **184 + 30 = 214 runs**.
 
 ### Run a Single Pipeline Only
 
 ```bash
-docker-compose up traditional       # Traditional ML only
-docker-compose up deep-learning     # Deep Learning only
-docker-compose up transformers      # Transformers only
+docker-compose up traditional
+docker-compose up deep-learning
+docker-compose up transformers
 ```
 
 ### Local (without Docker)
 
 ```bash
 pip install -r requirements.txt
-pip install loguru
 
-# All pipelines sequentially:
-python run_pipeline.py --data_path ./data/new_all.json --run all
+# Exp1 (baseline):
+python run_pipeline.py --run traditional --experiment exp1
+python run_pipeline.py --run dl --experiment exp1
+python run_pipeline.py --run transformers --experiment exp1
 
-# Individual:
-python run_pipeline.py --run traditional
-python run_pipeline.py --run dl
-python run_pipeline.py --run transformers
+# Exp2 (optimized):
+python run_pipeline.py --run traditional --experiment exp2
+python run_pipeline.py --run dl --experiment exp2
+python run_pipeline.py --run transformers --experiment exp2
 
-# Or directly:
-python -m src.traditional.traditional_pipeline --data_path ./data/new_all.json
-python -m src.deep_learning.dl_pipeline --data_path ./data/new_all.json
-python -m src.transformers.transformer_pipeline --data_path ./data/new_all.json
+# All pipelines sequentially (default: exp1):
+python run_pipeline.py --run all
 ```
 
 ### MLflow Monitoring
@@ -298,25 +361,23 @@ mlflow ui
 # Open http://localhost:5000 (local) or http://localhost:8002 (Docker)
 ```
 
-### Manual Error Analysis
+### Error Analysis
 
-**Phase 1 (val)**: After each run, a CSV+XLSX is generated in `analysis/val_analysis_*` with columns: `Text`, `True_Basic`, `True_Fine`, `Pred_Basic`, `Pred_Fine`, `Status`.
+**Phase 1 (val)**: After each run, CSV+XLSX in `analysis/val_analysis_*` (exp1) or `analysis_exp2/val_analysis_*` (exp2).
 
-**Phase 2 (test)**: After final evaluation, a CSV+XLSX is generated in `analysis/final_test_analysis_*` with the same columns.
+**Phase 2 (test)**: After final evaluation, CSV+XLSX in `analysis/final_test_analysis_*` (exp1) or `analysis_exp2/final_test_analysis_*` (exp2).
 
 ### Deep Inference Analysis (Phase 2 only)
-
-`src/utils/inference_analysis.py` provides per-sample deep analysis with probability scores:
 
 ```python
 from src.utils.inference_analysis import run_inference_and_analysis
 
 df = run_inference_and_analysis(
-    y_pred=y_pred_binary,       # (N, C) binary predictions
-    y_prob=probs_matrix,        # (N, C) sigmoid probabilities
-    y_test=y_test_binary,       # (N, C) ground truth
-    texts=test_texts_raw,       # list of raw text
-    id_to_label=ID_TO_BASIC,    # label mapping
+    y_pred=y_pred_binary,
+    y_prob=probs_matrix,
+    y_test=y_test_binary,
+    texts=test_texts_raw,
+    id_to_label=ID_TO_BASIC,
     pipeline_name="bilstm_fasttext_basic",
 )
 ```
@@ -325,9 +386,19 @@ df = run_inference_and_analysis(
 
 | File | Contents |
 |---|---|
-| `deep_analysis_*.csv` + `.xlsx` | Per-sample: text, true/pred labels, confidence, n_overpredict, n_underpredict, status, ambiguous labels, prob per label |
-| `hard_samples_*.csv` + `.xlsx` | Subset: complete_mismatch + low confidence (<0.55) + ambiguous labels (prob 0.3-0.7) |
+| `deep_analysis_*.csv` + `.xlsx` | Per-sample: text, true/pred labels, confidence, status, prob per label |
+| `hard_samples_*.csv` + `.xlsx` | Subset: complete_mismatch + low confidence + ambiguous labels |
 | `deep_analysis_summary_*.txt` | Aggregate: status distribution, avg confidence, per-label avg probability |
+
+---
+
+## Checkpoint & Resume
+
+All pipelines support automatic resume via `CheckpointManager`:
+
+- Completed runs are logged to `checkpoints/*_checkpoint.json` (exp1) or `checkpoints/*_checkpoint_exp2.json` (exp2)
+- On restart, completed runs are **skipped automatically**
+- Training resumes from the first unfinished run
 
 ---
 
@@ -346,40 +417,32 @@ emot              # ASCII emoticon → text
 tqdm
 accelerate
 loguru
+openpyxl          # XLSX output for analysis spreadsheets
 ```
 
 ---
 
 ## Stack Migration: 2023 → 2026
 
-The original thesis (Nabila Dita Putri, 2023) used **Sastrawi + manual slang dict + emot**. This pipeline migrates to **saka-nlp + emoji + emot** for the following reasons:
+The original thesis (Nabila Dita Putri, 2023) used **Sastrawi + manual slang dict + emot**. This pipeline migrates to **saka-nlp + emoji + emot**:
 
 ### Summary Table
 
 | Component | Thesis 2023 | Pipeline 2026 | Why Change |
 |---|---|---|---|
-| **Slang normalization** | Manual JSON dict from `louisowen6/NLP_bahasa_resources` (~1,500 entries, static file) | `saka.normalize()` — 1,018 entries from **Twitter COVID-19 Indonesia corpus** | Lexicon built from real social media data; evolves with Indonesian slang. Manual dict requires self-maintenance and misses newer slang. |
-| **Stemming / Morphology** | Sastrawi `StemmerFactory` — suffix-stripping only, returns bare root (`menyebarluaskan` → `sebar`, information lost) | `saka.analyze()` — full morphological analysis: root + prefix + suffix (`menyebarluaskan` → root `sebar luas`, prefixes `['meny']`, suffixes `['kan']`) | Morphological analysis preserves compound-word semantics critical for emotion detection. `sebar luas` ≠ `sebar` in nuance. |
-| **Stopword removal** | Sastrawi `StopWordRemoverFactory` — list-based, O(n) lookup per word | `saka.get_stopwords('id')` — **757 words** as `Set`, **O(1) lookup**, based on **Tala Dataset** | On 33K+ texts, O(1) vs O(n) per stopword check is significant. Tala dataset is the community-standard Indonesian stopword list. |
-| **Emoji (Unicode) handling** | ❌ **Not handled** — `emot` only handles ASCII emoticons (`:-D`), not Unicode emoji (`🔥😊👍`) | `emoji.demojize(language='id')` — 3,800+ emoji → Indonesian text (`🔥` → `api`, `❤️` → `hati merah`) | The original thesis had **no Unicode emoji handler** — a critical gap for social media text where emoji carry strong emotion signals. |
-| **Emoticon handling** | `emot` (same) | `emot` (same) | No change — `emot` still handles ASCII emoticons (`:-)`, `:D`, `:P`). |
-| **Tokenization** | `str.split()` — no special handling for punctuation, compound tokens | `saka.tokenize()` — proper Indonesian tokenizer | Better token boundaries = better feature extraction. |
-| **Async support** | ❌ Not available | ✅ `async_normalize()`, `async_tokenize()` built-in | Enables non-blocking batch processing on large datasets. |
-| **Library maintenance** | Sastrawi: last update **2018** (8 years stagnant). `emot`: stagnant since 2019. | saka-nlp: released **May 2026**. `emoji`: 3.4K+ GitHub stars, actively maintained. | Stale libraries miss new Indonesian slang, morphological patterns, and emoji additions. |
+| **Slang normalization** | Manual JSON dict (~1,500 entries, static) | `saka.normalize()` — 1,018 entries from **Twitter COVID-19 Indonesia corpus** | Lexicon built from real social media data; evolves with Indonesian slang. |
+| **Stemming / Morphology** | Sastrawi `StemmerFactory` — suffix-stripping only | `saka.analyze()` — full morphological analysis: root + prefix + suffix | Morphological analysis preserves compound-word semantics critical for emotion detection. |
+| **Stopword removal** | Sastrawi `StopWordRemoverFactory` — O(n) lookup | `saka.get_stopwords('id')` — **757 words** as `Set`, **O(1) lookup** | On 33K+ texts, O(1) vs O(n) per stopword check is significant. |
+| **Emoji (Unicode) handling** | ❌ **Not handled** | `emoji.demojize(language='id')` — 3,800+ emoji → Indonesian text | Critical gap for social media text where emoji carry strong emotion signals. |
+| **Emoticon handling** | `emot` (same) | `emot` (same) | No change. |
+| **Tokenization** | `str.split()` | `saka.tokenize()` | Better token boundaries = better feature extraction. |
 
 ### Performance Impact
 
 | Metric | Thesis 2023 (Sastrawi) | Pipeline 2026 (saka-nlp) | Speedup |
 |---|---|---|---|
-| Preprocessing time per text | ~181 ms (stemming bottleneck) | ~3.2 ms | **56× faster** |
-| Full 32K dataset preprocessing | ~92 min (with LRU cache + `ProcessPoolExecutor`) | ~2 min (single-threaded) | **46× faster** |
-| Parallelization needed | Yes (`ProcessPoolExecutor` required) | No (fast enough single-threaded) | Simpler code |
-
-### What Did NOT Change
-
-- **URL & username removal**: Regex-based removal is standard and universal. Only change: added support for `[URL]`/`[USERNAME]` placeholder tokens found in this dataset.
-- **Emoticon handling**: Still uses `emot` library — no better alternative exists for ASCII emoticon → text mapping.
-- **Hashtag removal**: New addition (not in thesis) — 153 rows in data contain hashtags that are noise for classification.
+| Preprocessing time per text | ~181 ms | ~3.2 ms | **56× faster** |
+| Full 32K dataset preprocessing | ~92 min | ~2 min | **46× faster** |
 
 ### References
 
