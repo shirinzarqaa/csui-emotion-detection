@@ -209,64 +209,10 @@ def evaluate_traditional_test(data_path, config, output_dir):
                                 preds_test_bin = apply_thresholds(full_test_probs, thresholds)
                             except Exception as e:
                                 logger.warning(f"Threshold tuning failed for {run_tag}: {e}")
-                else:
-                    logger.info(f"  Retraining {run_tag} on train only (deterministic, same model)...")
 
-                    vectorizer = _make_vectorizer(feat_conf)
-                    X_train = vectorizer.fit_transform(train_texts)
-                    X_val = vectorizer.transform(val_texts)
-                    X_test = vectorizer.transform(test_texts)
-
-                    base_model_cls = {"LR": LogisticRegression, "NB": MultinomialNB, "SVM": SVC}[model_type]
-                    base_model = base_model_cls(**MODEL_PARAMS[model_type])
-
-                    if is_powerset:
-                        model = base_model_cls(**MODEL_PARAMS[model_type])
-                        model.fit(X_train, y_train_lp)
-
-                        preds_val_lp = model.predict(X_val)
-                        preds_val_bin = lp_converter.inverse_transform(preds_val_lp)
-
-                        preds_test_lp = model.predict(X_test)
-                        preds_test_bin = lp_converter.inverse_transform(preds_test_lp)
-                    else:
-                        model = MultiOutputClassifier(base_model_cls(**MODEL_PARAMS[model_type]))
-                        if n_seen < n_total:
-                            y_train_filtered = y_train[:, seen_labels]
-                            model.fit(X_train, y_train_filtered)
-
-                            preds_val_filtered = model.predict(X_val)
-                            preds_val_bin = np.zeros((len(y_val), n_total), dtype=np.int32)
-                            preds_val_bin[:, seen_labels] = preds_val_filtered
-
-                            preds_test_filtered = model.predict(X_test)
-                            preds_test_bin = np.zeros((len(y_test), n_total), dtype=np.int32)
-                            preds_test_bin[:, seen_labels] = preds_test_filtered
-                        else:
-                            model.fit(X_train, y_train)
-                            preds_val_bin = model.predict(X_val)
-                            preds_test_bin = model.predict(X_test)
-
-                        if use_threshold_tuning and model_type in ("LR", "SVM"):
-                            try:
-                                proba_val = np.array([est.predict_proba(X_val)[:, 1] for est in model.estimators_]).T
-                                full_val_probs = np.zeros((len(y_val), n_total), dtype=np.float64)
-                                full_val_probs[:, seen_labels] = proba_val
-                                val_probs = full_val_probs
-
-                                thresholds = optimize_thresholds(y_val, val_probs, id_to_class)
-                                preds_val_bin = apply_thresholds(val_probs, thresholds)
-
-                                proba_test = np.array([est.predict_proba(X_test)[:, 1] for est in model.estimators_]).T
-                                full_test_probs = np.zeros((len(y_test), n_total), dtype=np.float64)
-                                full_test_probs[:, seen_labels] = proba_test
-                                preds_test_bin = apply_thresholds(full_test_probs, thresholds)
-                            except Exception as e:
-                                logger.warning(f"Threshold tuning failed for {run_tag}: {e}")
-
-                    os.makedirs(save_dir, exist_ok=True)
-                    joblib.dump(model, f"{save_dir}/model.joblib")
-                    joblib.dump(vectorizer, f"{save_dir}/vectorizer.joblib")
+                class_to_parent = taxonomy if is_fine else {}
+                val_metrics = compute_all_metrics_binary(y_val, preds_val_bin, id_to_class, class_to_parent)
+                test_metrics = compute_all_metrics_binary(y_test, preds_test_bin, id_to_class, class_to_parent)
 
                 result = {
                     "pipeline": "Traditional ML",
