@@ -307,11 +307,21 @@ def evaluate_dl_test(data_path, config, output_dir):
             bert_mode = False
 
             if model_type == 'bilstm':
-                model = BiLSTM(embed_dim, param_value, num_classes, num_layers=config["dl_bilstm_layers"])
+                classifier = BiLSTM(embed_dim, param_value, num_classes, num_layers=config["dl_bilstm_layers"])
             else:
-                model = TextCNN(embed_dim, num_classes, num_filters=param_value)
-            model.embedding = nn.Embedding.from_pretrained(torch.FloatTensor(emb_matrix), freeze=False)
-            model.embedding.weight.data[0] = torch.zeros(embed_dim)
+                classifier = TextCNN(embed_dim, num_classes, num_filters=param_value)
+
+            embedding_layer = nn.Embedding.from_pretrained(torch.FloatTensor(emb_matrix), freeze=True, padding_idx=0)
+
+            class FastTextModel(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.embedding = embedding_layer
+                    self.classifier = classifier
+                def forward(self, x):
+                    return self.classifier(self.embedding(x))
+
+            model = FastTextModel()
         else:
             tokenizer, bert_model, embed_dim = build_indobert_embedder(freeze=True)
             test_ds = BertDataset(test_texts, y_test, tokenizer, max_len=max_len)
@@ -319,10 +329,20 @@ def evaluate_dl_test(data_path, config, output_dir):
             bert_mode = True
 
             if model_type == 'bilstm':
-                model = BiLSTM(embed_dim, param_value, num_classes, num_layers=config["dl_bilstm_layers"])
+                classifier = BiLSTM(embed_dim, param_value, num_classes, num_layers=config["dl_bilstm_layers"])
             else:
-                model = TextCNN(embed_dim, num_classes, num_filters=param_value)
-            model.bert = bert_model
+                classifier = TextCNN(embed_dim, num_classes, num_filters=param_value)
+
+            class IndoBERTModel(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.bert = bert_model
+                    self.classifier = classifier
+                def forward(self, input_ids, attention_mask):
+                    bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+                    return self.classifier(bert_outputs.last_hidden_state)
+
+            model = IndoBERTModel()
 
         state_dict = torch.load(model_path, map_location=DEVICE, weights_only=True)
         model.load_state_dict(state_dict)
