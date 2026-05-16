@@ -170,6 +170,8 @@ def evaluate_traditional_test(data_path, config, output_dir):
 
                 val_probs = None
                 thresholds = None
+                model = None
+                vectorizer = None
 
                 if os.path.exists(model_joblib) and os.path.exists(vectorizer_joblib):
                     logger.info(f"  Loading {run_tag} from saved model (skip retrain)...")
@@ -178,12 +180,48 @@ def evaluate_traditional_test(data_path, config, output_dir):
                     X_val = vectorizer.transform(val_texts)
                     X_test = vectorizer.transform(test_texts)
 
+                    n_features_expected = feat_conf['max_features']
+                    vocab_size = len(vectorizer.vocabulary_)
+                    if vocab_size != n_features_expected:
+                        logger.warning(f"  Saved vectorizer has {vocab_size} features, expected {n_features_expected}. Retraining...")
+                        os.remove(model_joblib)
+                        os.remove(vectorizer_joblib)
+                        model = None
+                        vectorizer = None
+
+                if model is not None and os.path.exists(model_joblib):
                     if is_powerset:
                         preds_val_lp = model.predict(X_val)
                         preds_val_bin = lp_converter.inverse_transform(preds_val_lp)
                         preds_test_lp = model.predict(X_test)
                         preds_test_bin = lp_converter.inverse_transform(preds_test_lp)
                     else:
+                        if n_seen < n_total:
+                            preds_val_filtered = model.predict(X_val)
+                            preds_val_bin = np.zeros((len(y_val), n_total), dtype=np.int32)
+                            preds_val_bin[:, seen_labels] = preds_val_filtered
+                            preds_test_filtered = model.predict(X_test)
+                            preds_test_bin = np.zeros((len(y_test), n_total), dtype=np.int32)
+                            preds_test_bin[:, seen_labels] = preds_test_filtered
+                        else:
+                            preds_val_bin = model.predict(X_val)
+                            preds_test_bin = model.predict(X_test)
+
+                        if use_threshold_tuning and model_type in ("LR", "SVM"):
+                            try:
+                                proba_val = np.array([est.predict_proba(X_val)[:, 1] for est in model.estimators_]).T
+                                full_val_probs = np.zeros((len(y_val), n_total), dtype=np.float64)
+                                full_val_probs[:, seen_labels] = proba_val
+                                val_probs = full_val_probs
+                                thresholds = optimize_thresholds(y_val, val_probs, id_to_class)
+                                preds_val_bin = apply_thresholds(val_probs, thresholds)
+                                proba_test = np.array([est.predict_proba(X_test)[:, 1] for est in model.estimators_]).T
+                                full_test_probs = np.zeros((len(y_test), n_total), dtype=np.float64)
+                                full_test_probs[:, seen_labels] = proba_test
+                                preds_test_bin = apply_thresholds(full_test_probs, thresholds)
+                            except Exception as e:
+                                logger.warning(f"Threshold tuning failed for {run_tag}: {e}")
+                else:
                         if n_seen < n_total:
                             preds_val_filtered = model.predict(X_val)
                             preds_val_bin = np.zeros((len(y_val), n_total), dtype=np.int32)
