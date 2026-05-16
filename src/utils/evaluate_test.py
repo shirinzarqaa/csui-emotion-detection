@@ -24,6 +24,27 @@ from src.utils.experiment_config import get_config
 from src.deep_learning.models import BiLSTM, TextCNN, FastTextDataset, BertDataset
 from src.deep_learning.dl_pipeline import build_fasttext_embedding, build_indobert_embedder, predict_probs
 
+
+def _try_load_mlflow_model(run_tag, mlflow_experiment_name, tracking_uri="http://localhost:8002"):
+    try:
+        import mlflow
+        mlflow.set_tracking_uri(tracking_uri)
+        exp = mlflow.search_experiments(filter_string=f"name = '{mlflow_experiment_name}'")
+        if not exp:
+            return None
+        exp_id = exp[0].experiment_id
+        runs = mlflow.search_runs(experiment_ids=[exp_id], filter_string=f"tags.mlflow.runName = '{run_tag}'")
+        if runs.empty:
+            return None
+        run_id = runs.iloc[0]["run_id"]
+        model_uri = f"runs:/{run_id}/model"
+        model = mlflow.sklearn.load_model(model_uri)
+        logger.info(f"  Loaded {run_tag} from MLflow (run_id={run_id[:8]})")
+        return model
+    except Exception as e:
+        logger.debug(f"  MLflow load failed for {run_tag}: {e}")
+        return None
+
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 MODEL_PARAMS = {
@@ -144,6 +165,8 @@ def evaluate_traditional_test(data_path, config, output_dir):
     ]
 
     use_threshold_tuning = config["threshold_tuning"]
+    mlflow_experiment_name = config["mlflow_experiment_p1_trad"]
+    mlflow_uri = "http://localhost:8002"
     all_results = []
 
     for scenario, y_train, y_val, y_test, id_to_class, is_powerset, is_fine in scenarios:
@@ -163,62 +186,105 @@ def evaluate_traditional_test(data_path, config, output_dir):
                 feat_name = feat_conf['name']
                 run_tag = f"{scenario}_{feat_name}_{model_type}"
 
-                logger.info(f"  Training {run_tag} on train only, evaluating on test...")
-
                 vectorizer = _make_vectorizer(feat_conf)
                 X_train = vectorizer.fit_transform(train_texts)
                 X_val = vectorizer.transform(val_texts)
                 X_test = vectorizer.transform(test_texts)
 
-                base_model_cls = {"LR": LogisticRegression, "NB": MultinomialNB, "SVM": SVC}[model_type]
-                base_model = base_model_cls(**MODEL_PARAMS[model_type])
-
                 val_probs = None
                 thresholds = None
+                loaded_from_mlflow = False
 
-                if is_powerset:
-                    model = base_model_cls(**MODEL_PARAMS[model_type])
-                    model.fit(X_train, y_train_lp)
+                model = _try_load_mlflow_model(run_tag, mlflow_experiment_name, mlflow_uri)
 
-                    preds_val_lp = model.predict(X_val)
-                    preds_val_bin = lp_converter.inverse_transform(preds_val_lp)
+                if model is not None:
+                    loaded_from_mlflow = True
+                    logger.info(f"  {run_tag} loaded from MLflow, predicting on val + test...")
 
-                    preds_test_lp = model.predict(X_test)
-                    preds_test_bin = lp_converter.inverse_transform(preds_test_lp)
-                else:
-                    model = MultiOutputClassifier(base_model_cls(**MODEL_PARAMS[model_type]))
-                    if n_seen < n_total:
-                        y_train_filtered = y_train[:, seen_labels]
-                        model.fit(X_train, y_train_filtered)
+                    if is_powerset:
+                        preds_val_lp = model.predict(X_val)
+                        preds_val_bin = lp_converter.inverse_transform(preds_val_lp)
 
-                        preds_val_filtered = model.predict(X_val)
-                        preds_val_bin = np.zeros((len(y_val), n_total), dtype=np.int32)
-                        preds_val_bin[:, seen_labels] = preds_val_filtered
-
-                        preds_test_filtered = model.predict(X_test)
-                        preds_test_bin = np.zeros((len(y_test), n_total), dtype=np.int32)
-                        preds_test_bin[:, seen_labels] = preds_test_filtered
+                        preds_test_lp = model.predict(X_test)
+                        preds_test_bin = lp_converter.inverse_transform(preds_test_lp)
                     else:
-                        model.fit(X_train, y_train)
-                        preds_val_bin = model.predict(X_val)
-                        preds_test_bin = model.predict(X_test)
+                        if n_seen < n_total:
+                            preds_val_filtered = model.predict(X_val)
+                            preds_val_bin = np.zeros((len(y_val), n_total), dtype=np.int32)
+                            preds_val_bin[:, seen_labels] = preds_val_filtered
 
-                    if use_threshold_tuning and model_type in ("LR", "SVM"):
-                        try:
-                            proba_val = np.array([est.predict_proba(X_val)[:, 1] for est in model.estimators_]).T
-                            full_val_probs = np.zeros((len(y_val), n_total), dtype=np.float64)
-                            full_val_probs[:, seen_labels] = proba_val
-                            val_probs = full_val_probs
+                            preds_test_filtered = model.predict(X_test)
+                            preds_test_bin = np.zeros((len(y_test), n_total), dtype=np.int32)
+                            preds_test_bin[:, seen_labels] = preds_test_filtered
+                        else:
+                            preds_val_bin = model.predict(X_val)
+                            preds_test_bin = model.predict(X_test)
 
-                            thresholds = optimize_thresholds(y_val, val_probs, id_to_class)
-                            preds_val_bin = apply_thresholds(val_probs, thresholds)
+                        if use_threshold_tuning and model_type in ("LR", "SVM"):
+                            try:
+                                proba_val = np.array([est.predict_proba(X_val)[:, 1] for est in model.estimators_]).T
+                                full_val_probs = np.zeros((len(y_val), n_total), dtype=np.float64)
+                                full_val_probs[:, seen_labels] = proba_val
+                                val_probs = full_val_probs
 
-                            proba_test = np.array([est.predict_proba(X_test)[:, 1] for est in model.estimators_]).T
-                            full_test_probs = np.zeros((len(y_test), n_total), dtype=np.float64)
-                            full_test_probs[:, seen_labels] = proba_test
-                            preds_test_bin = apply_thresholds(full_test_probs, thresholds)
-                        except Exception as e:
-                            logger.warning(f"Threshold tuning failed for {run_tag}: {e}")
+                                thresholds = optimize_thresholds(y_val, val_probs, id_to_class)
+                                preds_val_bin = apply_thresholds(val_probs, thresholds)
+
+                                proba_test = np.array([est.predict_proba(X_test)[:, 1] for est in model.estimators_]).T
+                                full_test_probs = np.zeros((len(y_test), n_total), dtype=np.float64)
+                                full_test_probs[:, seen_labels] = proba_test
+                                preds_test_bin = apply_thresholds(full_test_probs, thresholds)
+                            except Exception as e:
+                                logger.warning(f"Threshold tuning failed for {run_tag}: {e}")
+                else:
+                    logger.info(f"  Training {run_tag} on train only (MLflow miss), evaluating on test...")
+
+                    base_model_cls = {"LR": LogisticRegression, "NB": MultinomialNB, "SVM": SVC}[model_type]
+                    base_model = base_model_cls(**MODEL_PARAMS[model_type])
+
+                    if is_powerset:
+                        model = base_model_cls(**MODEL_PARAMS[model_type])
+                        model.fit(X_train, y_train_lp)
+
+                        preds_val_lp = model.predict(X_val)
+                        preds_val_bin = lp_converter.inverse_transform(preds_val_lp)
+
+                        preds_test_lp = model.predict(X_test)
+                        preds_test_bin = lp_converter.inverse_transform(preds_test_lp)
+                    else:
+                        model = MultiOutputClassifier(base_model_cls(**MODEL_PARAMS[model_type]))
+                        if n_seen < n_total:
+                            y_train_filtered = y_train[:, seen_labels]
+                            model.fit(X_train, y_train_filtered)
+
+                            preds_val_filtered = model.predict(X_val)
+                            preds_val_bin = np.zeros((len(y_val), n_total), dtype=np.int32)
+                            preds_val_bin[:, seen_labels] = preds_val_filtered
+
+                            preds_test_filtered = model.predict(X_test)
+                            preds_test_bin = np.zeros((len(y_test), n_total), dtype=np.int32)
+                            preds_test_bin[:, seen_labels] = preds_test_filtered
+                        else:
+                            model.fit(X_train, y_train)
+                            preds_val_bin = model.predict(X_val)
+                            preds_test_bin = model.predict(X_test)
+
+                        if use_threshold_tuning and model_type in ("LR", "SVM"):
+                            try:
+                                proba_val = np.array([est.predict_proba(X_val)[:, 1] for est in model.estimators_]).T
+                                full_val_probs = np.zeros((len(y_val), n_total), dtype=np.float64)
+                                full_val_probs[:, seen_labels] = proba_val
+                                val_probs = full_val_probs
+
+                                thresholds = optimize_thresholds(y_val, val_probs, id_to_class)
+                                preds_val_bin = apply_thresholds(val_probs, thresholds)
+
+                                proba_test = np.array([est.predict_proba(X_test)[:, 1] for est in model.estimators_]).T
+                                full_test_probs = np.zeros((len(y_test), n_total), dtype=np.float64)
+                                full_test_probs[:, seen_labels] = proba_test
+                                preds_test_bin = apply_thresholds(full_test_probs, thresholds)
+                            except Exception as e:
+                                logger.warning(f"Threshold tuning failed for {run_tag}: {e}")
 
                 class_to_parent = taxonomy if is_fine else {}
                 val_metrics = compute_all_metrics_binary(y_val, preds_val_bin, id_to_class, class_to_parent)
