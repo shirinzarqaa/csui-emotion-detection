@@ -33,12 +33,12 @@ MODEL_PARAMS = {
 }
 
 FEATURE_CONFIGS = [
-    {"name": "Unigram_BoW", "ngram_range": (1, 1), "vectorizer": "count", "max_features": 10000},
-    {"name": "Unigram_TFIDF", "ngram_range": (1, 1), "vectorizer": "tfidf", "max_features": 10000},
+    {"name": "Unigram_BoW", "ngram_range": (1, 1), "vectorizer": "count", "max_features": 5000},
+    {"name": "Unigram_TFIDF", "ngram_range": (1, 1), "vectorizer": "tfidf", "max_features": 5000},
     {"name": "Bigram_BoW", "ngram_range": (1, 2), "vectorizer": "count", "max_features": 10000},
     {"name": "Bigram_TFIDF", "ngram_range": (1, 2), "vectorizer": "tfidf", "max_features": 10000},
-    {"name": "Trigram_BoW", "ngram_range": (1, 3), "vectorizer": "count", "max_features": 10000},
-    {"name": "Trigram_TFIDF", "ngram_range": (1, 3), "vectorizer": "tfidf", "max_features": 10000},
+    {"name": "Trigram_BoW", "ngram_range": (1, 3), "vectorizer": "count", "max_features": 15000},
+    {"name": "Trigram_TFIDF", "ngram_range": (1, 3), "vectorizer": "tfidf", "max_features": 15000},
 ]
 
 TRANSFORMER_MODELS = {
@@ -223,6 +223,12 @@ def evaluate_traditional_test(data_path, config, output_dir):
                 class_to_parent = taxonomy if is_fine else {}
                 val_metrics = compute_all_metrics_binary(y_val, preds_val_bin, id_to_class, class_to_parent)
                 test_metrics = compute_all_metrics_binary(y_test, preds_test_bin, id_to_class, class_to_parent)
+
+                import joblib
+                save_dir = f"{config['saved_models_dir']}/{run_tag}"
+                os.makedirs(save_dir, exist_ok=True)
+                joblib.dump(model, f"{save_dir}/model.joblib")
+                joblib.dump(vectorizer, f"{save_dir}/vectorizer.joblib")
 
                 result = {
                     "pipeline": "Traditional ML",
